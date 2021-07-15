@@ -116,6 +116,7 @@ fn create_schema(
     aggr_expr: &[Arc<dyn AggregateExpr>],
     mode: AggregateMode,
 ) -> Result<Schema> {
+    println!("{:?}", input_schema);
     let mut fields = Vec::with_capacity(group_expr.len() + aggr_expr.len());
     for (expr, name) in group_expr {
         fields.push(Field::new(
@@ -152,6 +153,7 @@ impl HashAggregateExec {
         input: Arc<dyn ExecutionPlan>,
         input_schema: SchemaRef,
     ) -> Result<Self> {
+        println!("HashAgg try_new input schema: {:?}", &input.schema());
         let schema = create_schema(&input.schema(), &group_expr, &aggr_expr, mode)?;
 
         let schema = Arc::new(schema);
