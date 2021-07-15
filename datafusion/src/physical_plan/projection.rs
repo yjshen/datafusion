@@ -70,6 +70,8 @@ impl ProjectionExec {
             })
             .collect();
 
+        println!("Project input {:?}, fields: {:?}", input, fields);
+
         let schema = Arc::new(Schema::new(fields?));
 
         Ok(Self {

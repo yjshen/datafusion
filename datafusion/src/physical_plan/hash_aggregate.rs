@@ -154,6 +154,7 @@ impl HashAggregateExec {
         input_schema: SchemaRef,
     ) -> Result<Self> {
         println!("HashAgg try_new input schema: {:?}", &input.schema());
+        println!("HashAgg try_new input: {:?}", input);
         let schema = create_schema(&input.schema(), &group_expr, &aggr_expr, mode)?;
 
         let schema = Arc::new(schema);
