@@ -248,6 +248,7 @@ impl ParquetExec {
             )));
         }
         let schema = Arc::new(schemas.pop().unwrap());
+        println!("parquet file schema {:?}", schema);
         let metrics = ParquetExecMetrics::new();
 
         let predicate_builder = predicate.and_then(|predicate_expr| {
@@ -296,6 +297,8 @@ impl ParquetExec {
                 .map(|i| schema.field(*i).clone())
                 .collect(),
         );
+
+        println!("Parquet schema after proj: projection {:?}, projected: {:?}", projection, projected_schema);
 
         // sum the statistics
         let mut num_rows: Option<usize> = None;

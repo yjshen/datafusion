@@ -57,6 +57,7 @@ impl ProjectionExec {
         input: Arc<dyn ExecutionPlan>,
     ) -> Result<Self> {
         let input_schema = input.schema();
+        println!("Project try_new input schema{:?}", input_schema);
 
         let fields: Result<Vec<_>> = expr
             .iter()
