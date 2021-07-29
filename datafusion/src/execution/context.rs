@@ -50,6 +50,8 @@ use crate::catalog::{
 };
 use crate::datasource::csv::CsvFile;
 use crate::datasource::parquet::ParquetTable;
+use crate::datasource::protocol_registry::LocalFSHandler;
+use crate::datasource::protocol_registry::ProtocolRegistry;
 use crate::datasource::TableProvider;
 use crate::error::{DataFusionError, Result};
 use crate::execution::dataframe_impl::DataFrameImpl;
@@ -156,6 +158,10 @@ impl ExecutionContext {
                 .register_catalog(config.default_catalog.clone(), default_catalog);
         }
 
+        // register local handler to enable read file from localFS
+        let protocol_registry = ProtocolRegistry::new();
+        protocol_registry.register_handler("file", Arc::new(LocalFSHandler {}));
+
         Self {
             state: Arc::new(Mutex::new(ExecutionContextState {
                 catalog_list,
@@ -164,6 +170,7 @@ impl ExecutionContext {
                 aggregate_functions: HashMap::new(),
                 config,
                 execution_props: ExecutionProps::new(),
+                protocol_registry,
             })),
         }
     }
@@ -356,6 +363,18 @@ impl ExecutionContext {
         };
 
         state.catalog_list.register_catalog(name, catalog)
+    }
+
+    pub fn register_protocol_handler(
+        &self,
+        prefix: &str,
+        handler: Arc<dyn ProtocolHander>,
+    ) -> Option<Arc<dyn ProtocolHander>> {
+        self.state
+            .lock()
+            .unwrap()
+            .protocol_registry
+            .register_handler(prefix, handler)
     }
 
     /// Retrieves a `CatalogProvider` instance by name
@@ -840,6 +859,8 @@ pub struct ExecutionContextState {
     pub config: ExecutionConfig,
     /// Execution properties
     pub execution_props: ExecutionProps,
+    /// Protocol handlers
+    pub protocol_registry: ProtocolRegistry,
 }
 
 impl ExecutionProps {
@@ -867,6 +888,7 @@ impl ExecutionContextState {
             aggregate_functions: HashMap::new(),
             config: ExecutionConfig::new(),
             execution_props: ExecutionProps::new(),
+            protocol_registry: ProtocolRegistry::new(),
         }
     }
 

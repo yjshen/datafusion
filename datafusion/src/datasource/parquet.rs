@@ -18,10 +18,10 @@
 //! Parquet data source
 
 use std::any::Any;
-use std::string::String;
 use std::sync::Arc;
 
 use arrow::datatypes::*;
+use parquet::file::reader::ChunkReader;
 
 use crate::datasource::datasource::Statistics;
 use crate::datasource::TableProvider;
@@ -31,34 +31,23 @@ use crate::physical_plan::parquet::ParquetExec;
 use crate::physical_plan::ExecutionPlan;
 
 use super::datasource::TableProviderFilterPushDown;
+use super::datasource2::DataSource2;
 
 /// Table-based representation of a `ParquetFile`.
 pub struct ParquetTable {
-    path: String,
-    schema: SchemaRef,
-    statistics: Statistics,
+    source: Arc<Box<dyn DataSource2>>,
     max_concurrency: usize,
     enable_pruning: bool,
 }
 
 impl ParquetTable {
     /// Attempt to initialize a new `ParquetTable` from a file path.
-    pub fn try_new(path: impl Into<String>, max_concurrency: usize) -> Result<Self> {
-        let path = path.into();
-        let parquet_exec = ParquetExec::try_from_path(&path, None, None, 0, 1, None)?;
-        let schema = parquet_exec.schema();
+    pub fn try_new(source: Arc<dyn DataSource2>, max_concurrency: usize) -> Result<Self> {
         Ok(Self {
-            path,
-            schema,
-            statistics: parquet_exec.statistics().to_owned(),
+            source,
             max_concurrency,
             enable_pruning: true,
         })
-    }
-
-    /// Get the path for the Parquet file(s) represented by this ParquetTable instance
-    pub fn path(&self) -> &str {
-        &self.path
     }
 
     /// Get parquet pruning option
@@ -80,7 +69,7 @@ impl TableProvider for ParquetTable {
 
     /// Get the schema for this parquet file.
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.source.schema().unwrap()
     }
 
     fn supports_filter_pushdown(
@@ -120,7 +109,7 @@ impl TableProvider for ParquetTable {
     }
 
     fn statistics(&self) -> Statistics {
-        self.statistics.clone()
+        self.source.statistics().clone()
     }
 
     fn has_exact_statistics(&self) -> bool {

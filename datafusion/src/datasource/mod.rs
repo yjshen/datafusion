@@ -19,10 +19,13 @@
 
 pub mod csv;
 pub mod datasource;
+pub mod datasource2;
 pub mod empty;
 pub mod json;
+pub mod local;
 pub mod memory;
 pub mod parquet;
+pub mod protocol_registry;
 
 pub use self::csv::{CsvFile, CsvReadOptions};
 pub use self::datasource::{TableProvider, TableType};
