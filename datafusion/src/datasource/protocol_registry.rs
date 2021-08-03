@@ -15,31 +15,23 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::datasource::local::LocalFSHandler;
+use crate::error::Result;
+use parquet::file::reader::ChunkReader;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::datasource::local::LocalFSHandler;
-use crate::error::Result;
-use std::any::Any;
-use std::fmt::{Debug, Formatter};
-use parquet::file::reader::ChunkReader;
-
-pub trait ProtocolHandler: Sync + Send {
+pub trait ProtocolHandler<R>: Sync + Send {
     /// Returns the protocol handler as [`Any`](std::any::Any)
     /// so that it can be downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
     fn list_all_files(&self, root_path: &str, ext: &str) -> Result<Vec<String>>;
 
-    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ChunkReader>>;
+    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ChunkReader<T = R>>>;
 
     fn handler_name(&self) -> String;
-}
-
-impl Debug for dyn ProtocolHandler {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.handler_name())
-    }
 }
 
 static LOCAL_SCHEME: &str = "file";

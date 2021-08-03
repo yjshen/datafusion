@@ -18,15 +18,15 @@
 use crate::datasource::protocol_registry::ProtocolHandler;
 use crate::error::DataFusionError;
 use crate::error::Result;
+use parquet::file::reader::ChunkReader;
 use std::any::Any;
 use std::fs;
 use std::fs::{metadata, File};
 use std::sync::Arc;
-use parquet::file::reader::ChunkReader;
 
 pub struct LocalFSHandler;
 
-impl ProtocolHandler for LocalFSHandler {
+impl ProtocolHandler<File> for LocalFSHandler {
     fn as_any(&self) -> &dyn Any {
         return self;
     }
@@ -35,7 +35,7 @@ impl ProtocolHandler for LocalFSHandler {
         list_all(root_path, ext)
     }
 
-    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ChunkReader>> {
+    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ChunkReader<T = File>>> {
         Ok(Arc::new(File::open(file_path)?))
     }
 
