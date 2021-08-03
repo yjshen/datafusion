@@ -40,12 +40,14 @@ use std::string::String;
 use std::sync::{Arc, Mutex};
 
 use crate::datasource::datasource::Statistics;
+use crate::datasource::local::LocalFSHandler;
+use crate::datasource::protocol_registry::ProtocolHandler;
 use crate::datasource::{Source, TableProvider};
 use crate::error::{DataFusionError, Result};
 use crate::logical_plan::Expr;
 use crate::physical_plan::csv::CsvExec;
 pub use crate::physical_plan::csv::CsvReadOptions;
-use crate::physical_plan::{common, ExecutionPlan};
+use crate::physical_plan::ExecutionPlan;
 
 /// Represents a CSV file with a provided schema
 pub struct CsvFile {
@@ -64,7 +66,8 @@ impl CsvFile {
         let schema = Arc::new(match options.schema {
             Some(s) => s.clone(),
             None => {
-                let filenames = common::build_file_list(&path, options.file_extension)?;
+                let filenames =
+                    LocalFSHandler {}.list_all_files(&path, options.file_extension)?;
                 if filenames.is_empty() {
                     return Err(DataFusionError::Plan(format!(
                         "No files found at {path} with file extension {file_extension}",

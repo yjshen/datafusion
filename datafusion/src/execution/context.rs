@@ -35,7 +35,7 @@ use std::string::String;
 use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
-    sync::Mutex,
+    sync::{Mutex, RwLock},
 };
 
 use futures::{StreamExt, TryStreamExt};
@@ -50,7 +50,7 @@ use crate::catalog::{
 };
 use crate::datasource::csv::CsvFile;
 use crate::datasource::parquet::ParquetTable;
-use crate::datasource::protocol_registry::LocalFSHandler;
+use crate::datasource::protocol_registry::ProtocolHandler;
 use crate::datasource::protocol_registry::ProtocolRegistry;
 use crate::datasource::TableProvider;
 use crate::error::{DataFusionError, Result};
@@ -127,10 +127,24 @@ pub struct ExecutionContext {
     pub state: Arc<Mutex<ExecutionContextState>>,
 }
 
+lazy_static! {
+    static ref CONTEXT: RwLock<Arc<ExecutionContext>> =
+        RwLock::new(Arc::new(ExecutionContext::new()));
+}
+
 impl ExecutionContext {
     /// Creates a new execution context using a default configuration.
     pub fn new() -> Self {
         Self::with_config(ExecutionConfig::new())
+    }
+
+    pub fn get() -> Arc<Self> {
+        CONTEXT.read().unwrap().clone()
+    }
+
+    pub fn set(context: ExecutionContext) {
+        let mut current_context = CONTEXT.write().unwrap();
+        *current_context = Arc::new(context);
     }
 
     /// Creates a new execution context using the provided configuration.
@@ -158,10 +172,6 @@ impl ExecutionContext {
                 .register_catalog(config.default_catalog.clone(), default_catalog);
         }
 
-        // register local handler to enable read file from localFS
-        let protocol_registry = ProtocolRegistry::new();
-        protocol_registry.register_handler("file", Arc::new(LocalFSHandler {}));
-
         Self {
             state: Arc::new(Mutex::new(ExecutionContextState {
                 catalog_list,
@@ -170,7 +180,7 @@ impl ExecutionContext {
                 aggregate_functions: HashMap::new(),
                 config,
                 execution_props: ExecutionProps::new(),
-                protocol_registry,
+                protocol_registry: ProtocolRegistry::new(),
             })),
         }
     }
@@ -368,8 +378,8 @@ impl ExecutionContext {
     pub fn register_protocol_handler(
         &self,
         prefix: &str,
-        handler: Arc<dyn ProtocolHander>,
-    ) -> Option<Arc<dyn ProtocolHander>> {
+        handler: Arc<dyn ProtocolHandler>,
+    ) -> Option<Arc<dyn ProtocolHandler>> {
         self.state
             .lock()
             .unwrap()

@@ -15,16 +15,31 @@
 // specific language governing permissions and limitations
 // under the License.
 
-pub mod parquet_source;
-
-use super::datasource2::DataSource2;
+use crate::datasource::protocol_registry::ProtocolHandler;
 use crate::error::DataFusionError;
 use crate::error::Result;
+use std::any::Any;
 use std::fs;
-use std::fs::metadata;
+use std::fs::{metadata, File};
+
+pub struct LocalFSHandler;
+
+impl ProtocolHandler for LocalFSHandler {
+    fn as_any(&self) -> &dyn Any {
+        return self;
+    }
+
+    fn list_all_files(&self, root_path: &str, ext: &str) -> Result<Vec<String>> {
+        list_all(root_path, ext);
+    }
+
+    fn get_reader(&self, file_path: &str) -> Result<File> {
+        Ok(File::open(file_path)?)
+    }
+}
 
 /// Recursively build a list of files in a directory with a given extension with an accumulator list
-pub fn list_all_files(dir: &str, filenames: &mut Vec<String>, ext: &str) -> Result<()> {
+fn list_all_files(dir: &str, filenames: &mut Vec<String>, ext: &str) -> Result<()> {
     let metadata = metadata(dir)?;
     if metadata.is_file() {
         if dir.ends_with(ext) {
@@ -46,4 +61,10 @@ pub fn list_all_files(dir: &str, filenames: &mut Vec<String>, ext: &str) -> Resu
         }
     }
     Ok(())
+}
+
+fn list_all(root_path: &str, ext: &str) -> Result<Vec<String>> {
+    let mut filenames: Vec<String> = Vec::new();
+    list_all_files(root_path, &mut filenames, ext);
+    Ok(filenames)
 }

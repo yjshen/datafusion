@@ -18,11 +18,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::datasource2::DataSource2;
-use crate::error::{DataFusionError, Result};
-use crate::parquet::file::reader::ChunkReader;
+use crate::datasource::local::LocalFSHandler;
+use crate::datasource::ReadSeek;
+use crate::error::Result;
 use std::any::Any;
-use std::fs::File;
 
 pub trait ProtocolHandler: Sync + Send {
     /// Returns the protocol handler as [`Any`](std::any::Any)
@@ -31,26 +30,10 @@ pub trait ProtocolHandler: Sync + Send {
 
     fn list_all_files(&self, root_path: &str, ext: &str) -> Result<Vec<String>>;
 
-    fn get_reader(&self, file_path: &str) -> Result<dyn ChunkReader>;
+    fn get_reader(&self, file_path: &str) -> Result<dyn ReadSeek>;
 }
 
-pub struct LocalFSHandler;
-
-impl ProtocolHander for LocalFSHander {
-    fn as_any(&self) -> &dyn Any {
-        return self;
-    }
-
-    fn list_all_files(&self, root_path: &str, ext: &str) -> Result<Vec<String>> {
-        let mut filenames: Vec<String> = Vec::new();
-        crate::datasource::local::list_all_files(root_path, &mut filenames, ext);
-        Ok(filenames)
-    }
-
-    fn get_reader(&self, file_path: &str) -> Result<R> {
-        Ok(File::open(file_path)?)
-    }
-}
+static LOCAL_SCHEME: &str = "file";
 
 pub struct ProtocolRegistry {
     pub protocol_handlers: RwLock<HashMap<String, Arc<dyn ProtocolHandler>>>,
@@ -58,8 +41,11 @@ pub struct ProtocolRegistry {
 
 impl ProtocolRegistry {
     pub fn new() -> Self {
+        let mut map = HashMap::new();
+        map.insert(LOCAL_SCHEME, Arc::new(LocalFSHandler));
+
         Self {
-            protocol_handlers: RwLock::new(HashMap::new()),
+            protocol_handlers: RwLock::new(map),
         }
     }
 
@@ -67,15 +53,30 @@ impl ProtocolRegistry {
     /// If a handler of the same prefix existed before, it is replaced in the registry and returned.
     pub fn register_handler(
         &self,
-        prefix: &str,
-        handler: Arc<dyn ProtocolHander>,
-    ) -> Option<Arc<dyn ProtocolHander>> {
+        scheme: &str,
+        handler: Arc<dyn ProtocolHandler>,
+    ) -> Option<Arc<dyn ProtocolHandler>> {
         let mut handlers = self.protocol_handlers.write().unwrap();
-        handlers.insert(prefix.to_string(), handler)
+        handlers.insert(scheme.to_string(), handler)
     }
 
-    pub fn handler(&self, prefix: &str) -> Option<Arc<dyn ProtocolHander>> {
+    pub fn handler(&self, scheme: &str) -> Option<Arc<dyn ProtocolHandler>> {
         let handlers = self.protocol_handlers.read().unwrap();
-        handlers.get(prefix).cloned()
+        handlers.get(scheme).cloned()
+    }
+
+    pub fn handler_for_path(&self, path: &str) -> Arc<dyn ProtocolHandler> {
+        if let Some((scheme, _)) = path.split_once(':') {
+            let handlers = self.protocol_handlers.read().unwrap();
+            if let Some(handler) = handlers.get(&*scheme.to_lowercase()) {
+                return handler.clone();
+            }
+        }
+        self.protocol_handlers
+            .read()
+            .unwrap()
+            .get(LOCAL_SCHEME)
+            .unwrap()
+            .clone()
     }
 }

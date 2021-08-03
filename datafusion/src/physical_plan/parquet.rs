@@ -17,20 +17,17 @@
 
 //! Execution plan for reading Parquet files
 
-use core::num;
 use std::fmt;
-use std::fs::File;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::{any::Any, convert::TryInto};
 
 use crate::{
-    datasource::datasource2::{DataSource2, FilePartition, SourceDescriptor},
     error::{DataFusionError, Result},
     logical_plan::{Column, Expr},
     physical_optimizer::pruning::{PruningPredicate, PruningStatistics},
     physical_plan::{
-        common, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+        DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
         SendableRecordBatchStream,
     },
     scalar::ScalarValue,
@@ -44,7 +41,6 @@ use arrow::{
 };
 use hashbrown::HashMap;
 use log::debug;
-use parquet::file::reader::ChunkReader;
 use parquet::file::{
     metadata::RowGroupMetaData,
     reader::{FileReader, SerializedFileReader},
@@ -65,7 +61,9 @@ use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
 
 use super::SQLMetric;
-use crate::datasource::datasource2::PartitionedFile;
+use crate::datasource::parquet_desc::ParquetRootDesc;
+use crate::datasource::protocol_registry::ProtocolHandler;
+use crate::datasource::{get_statistics_with_limit, FilePartition, PartitionedFile};
 
 /// Execution plan for scanning one or more Parquet partitions
 #[derive(Debug, Clone)]
@@ -73,7 +71,7 @@ pub struct ParquetExec {
     /// Parquet partitions to read
     partitions: Vec<ParquetPartition>,
     /// Source used for get reader for partitions
-    source: Arc<dyn DataSource2>,
+    handler: Arc<dyn ProtocolHandler>,
     /// Schema after projection is applied
     schema: SchemaRef,
     /// Projection for which columns to load
@@ -136,63 +134,30 @@ impl ParquetExec {
     ) -> Result<Self> {
         // build a list of filenames from the specified path, which could be a single file or
         // a directory containing one or more parquet files
-        let filenames = common::build_file_list(path, ".parquet")?;
-        if filenames.is_empty() {
-            Err(DataFusionError::Plan(format!(
-                "No Parquet files (with .parquet extension) found at path {}",
-                path
-            )))
-        } else {
-            let filenames = filenames
-                .iter()
-                .map(|filename| filename.as_str())
-                .collect::<Vec<&str>>();
-            Self::try_from_files(
-                &filenames,
-                projection,
-                predicate,
-                batch_size,
-                max_concurrency,
-                limit,
-            )
-        }
+        let root_desc = ParquetRootDesc::new(path);
+        Self::try_new(
+            Arc::new(root_desc),
+            projection,
+            predicate,
+            batch_size,
+            max_concurrency,
+            limit,
+        )
     }
 
     pub fn try_new(
-        source: Arc<dyn DataSource2>,
-        source_desc: SourceDescriptor,
+        desc: Arc<ParquetRootDesc>,
         projection: Option<Vec<usize>>,
         predicate: Option<Expr>,
         batch_size: usize,
         max_concurrency: usize,
         limit: Option<usize>,
     ) -> Result<Self> {
-        debug!("Creating ParquetExec, source_desc: {:?}, projection {:?}, predicate: {:?}, limit: {:?}",
-            source_desc, projection, predicate, limit);
+        debug!("Creating ParquetExec, desc: {:?}, projection {:?}, predicate: {:?}, limit: {:?}",
+               desc, projection, predicate, limit);
 
-        let mut all_files = source_desc.partition_files;
-        let schema = Arc::new(all_files.first()?.schema.clone());
-
-        let mut total_byte_size = 0;
-        let mut null_counts = vec![0; schema.fields().len()];
-
-        let mut num_rows = 0;
-        let mut num_files = 0;
-        for file in all_files {
-            num_files += 1;
-            let file_stats = file.statistics;
-            num_rows += file_stats.num_rows.unwrap_or(0);
-            total_byte_size += file_stats.total_byte_size.unwrap_or(0);
-            if let Some(vec) = file_stats.column_statistics {
-                for (i, cs) in vec.iter().enumerate() {
-                    null_counts[i] += cs.null_count.unwrap_or(0);
-                }
-            }
-            if num_rows > limit.unwrap_or(usize::MAX) {
-                break;
-            }
-        }
-        all_files.truncate(num_files);
+        let (all_files, statistics) = get_statistics_with_limit(&desc.descriptor, limit);
+        let schema = desc.schema();
 
         let mut partitions = Vec::with_capacity(max_concurrency);
         let mut chunk_size = all_files.len() / max_concurrency;
@@ -203,22 +168,6 @@ impl ParquetExec {
         for (index, group) in chunked_files.enumerate() {
             partitions.push(ParquetPartition::new(Vec::from(group), index));
         }
-
-        let column_stats = null_counts
-            .iter()
-            .map(|null_count| ColumnStatistics {
-                null_count: Some(*null_count as usize),
-                max_value: None,
-                min_value: None,
-                distinct_count: None,
-            })
-            .collect();
-
-        let statistics = Statistics {
-            num_rows: Some(num_rows as usize),
-            total_byte_size: Some(total_byte_size as usize),
-            column_statistics: Some(column_stats),
-        };
 
         let predicate_builder = predicate.and_then(|predicate_expr| {
             match PruningPredicate::try_new(&predicate_expr, schema.clone()) {
@@ -236,7 +185,7 @@ impl ParquetExec {
 
         Ok(Self::new(
             partitions,
-            source,
+            desc.protocol_handler.clone(),
             schema,
             projection,
             statistics,
@@ -250,7 +199,7 @@ impl ParquetExec {
     /// Create a new Parquet reader execution plan with provided partitions and schema
     pub fn new(
         partitions: Vec<ParquetPartition>,
-        source: Arc<dyn DataSource2>,
+        handler: Arc<dyn ProtocolHandler>,
         schema: SchemaRef,
         projection: Option<Vec<usize>>,
         statistics: Statistics,
@@ -288,7 +237,7 @@ impl ParquetExec {
 
         Self {
             partitions,
-            source,
+            handler,
             schema: Arc::new(projected_schema),
             projection,
             metrics,
@@ -411,7 +360,7 @@ impl ExecutionPlan for ParquetExec {
 
         task::spawn_blocking(move || {
             if let Err(e) = read_files(
-                *self.source,
+                *self.handler,
                 partition,
                 metrics,
                 &projection,
@@ -608,7 +557,7 @@ fn build_row_group_predicate(
 }
 
 fn read_files(
-    source: Arc<dyn DataSource2>,
+    handler: Arc<dyn ProtocolHandler>,
     partition: ParquetPartition,
     metrics: ParquetPartitionMetrics,
     projection: &[usize],
@@ -620,7 +569,7 @@ fn read_files(
     let mut total_rows = 0;
     let all_files = partition.file_partition.files;
     'outer: for partitioned_file in all_files {
-        let reader = source.get_read_for_file(partitioned_file)?;
+        let reader = handler.get_reader(partitioned_file.file_path.as_str())?;
         let mut file_reader = SerializedFileReader::new(reader)?;
         if let Some(predicate_builder) = predicate_builder {
             let row_group_predicate = build_row_group_predicate(
@@ -648,7 +597,7 @@ fn read_files(
                 Some(Err(e)) => {
                     let err_msg = format!(
                         "Error reading batch from {}: {}",
-                        filename,
+                        partitioned_file,
                         e.to_string()
                     );
                     // send error to operator

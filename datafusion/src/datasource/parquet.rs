@@ -21,7 +21,6 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::*;
-use parquet::file::reader::ChunkReader;
 
 use crate::datasource::datasource::Statistics;
 use crate::datasource::TableProvider;
@@ -31,20 +30,22 @@ use crate::physical_plan::parquet::ParquetExec;
 use crate::physical_plan::ExecutionPlan;
 
 use super::datasource::TableProviderFilterPushDown;
-use super::datasource2::DataSource2;
+use crate::datasource::parquet_desc::ParquetRootDesc;
 
 /// Table-based representation of a `ParquetFile`.
 pub struct ParquetTable {
-    source: Arc<Box<dyn DataSource2>>,
+    desc: Arc<ParquetRootDesc>,
     max_concurrency: usize,
     enable_pruning: bool,
 }
 
 impl ParquetTable {
     /// Attempt to initialize a new `ParquetTable` from a file path.
-    pub fn try_new(source: Arc<dyn DataSource2>, max_concurrency: usize) -> Result<Self> {
+    pub fn try_new(path: impl Into<String>, max_concurrency: usize) -> Result<Self> {
+        let path = path.into();
+        let root_desc = ParquetRootDesc::new(path.as_str());
         Ok(Self {
-            source,
+            desc: Arc::new(root_desc),
             max_concurrency,
             enable_pruning: true,
         })
@@ -69,7 +70,7 @@ impl TableProvider for ParquetTable {
 
     /// Get the schema for this parquet file.
     fn schema(&self) -> SchemaRef {
-        self.source.schema().unwrap()
+        self.desc.schema()
     }
 
     fn supports_filter_pushdown(
@@ -96,8 +97,8 @@ impl TableProvider for ParquetTable {
         } else {
             None
         };
-        Ok(Arc::new(ParquetExec::try_from_path(
-            &self.path,
+        Ok(Arc::new(ParquetExec::try_new(
+            self.desc.clone(),
             projection.clone(),
             predicate,
             limit
@@ -109,7 +110,7 @@ impl TableProvider for ParquetTable {
     }
 
     fn statistics(&self) -> Statistics {
-        self.source.statistics().clone()
+        self.desc.statistics()
     }
 
     fn has_exact_statistics(&self) -> bool {
