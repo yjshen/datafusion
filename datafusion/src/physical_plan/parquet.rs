@@ -136,7 +136,7 @@ impl ParquetExec {
         // a directory containing one or more parquet files
         let root_desc = ParquetRootDesc::new(path);
         Self::try_new(
-            Arc::new(root_desc),
+            Arc::new(root_desc?),
             projection,
             predicate,
             batch_size,
@@ -169,6 +169,8 @@ impl ParquetExec {
             partitions.push(ParquetPartition::new(Vec::from(group), index));
         }
 
+        let metrics = ParquetExecMetrics::new();
+
         let predicate_builder = predicate.and_then(|predicate_expr| {
             match PruningPredicate::try_new(&predicate_expr, schema.clone()) {
                 Ok(predicate_builder) => Some(predicate_builder),
@@ -189,7 +191,7 @@ impl ParquetExec {
             schema,
             projection,
             statistics,
-            ParquetExecMetrics::new(),
+            metrics,
             predicate_builder,
             batch_size,
             limit,
@@ -280,12 +282,12 @@ impl ParquetPartition {
 
     /// The Parquet filename for this partition
     pub fn filenames(&self) -> &[String] {
-        &self.filenames
+        todo!()
     }
 
     /// Statistics for this partition
     pub fn statistics(&self) -> &Statistics {
-        &self.statistics
+        todo!()
     }
 }
 
@@ -360,7 +362,7 @@ impl ExecutionPlan for ParquetExec {
 
         task::spawn_blocking(move || {
             if let Err(e) = read_files(
-                *self.handler,
+                self.handler.clone(),
                 partition,
                 metrics,
                 &projection,
@@ -389,9 +391,7 @@ impl ExecutionPlan for ParquetExec {
                 let files: Vec<_> = self
                     .partitions
                     .iter()
-                    .map(|pp| pp.filenames.iter())
-                    .flatten()
-                    .map(|s| s.as_str())
+                    .map(|pp| format!("{}", pp.file_partition))
                     .collect();
 
                 write!(

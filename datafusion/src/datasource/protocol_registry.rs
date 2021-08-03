@@ -19,9 +19,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::datasource::local::LocalFSHandler;
-use crate::datasource::ReadSeek;
 use crate::error::Result;
 use std::any::Any;
+use std::fmt::{Debug, Formatter};
+use parquet::file::reader::ChunkReader;
 
 pub trait ProtocolHandler: Sync + Send {
     /// Returns the protocol handler as [`Any`](std::any::Any)
@@ -30,7 +31,15 @@ pub trait ProtocolHandler: Sync + Send {
 
     fn list_all_files(&self, root_path: &str, ext: &str) -> Result<Vec<String>>;
 
-    fn get_reader(&self, file_path: &str) -> Result<dyn ReadSeek>;
+    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ChunkReader>>;
+
+    fn handler_name(&self) -> String;
+}
+
+impl Debug for dyn ProtocolHandler {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.handler_name())
+    }
 }
 
 static LOCAL_SCHEME: &str = "file";
@@ -41,8 +50,8 @@ pub struct ProtocolRegistry {
 
 impl ProtocolRegistry {
     pub fn new() -> Self {
-        let mut map = HashMap::new();
-        map.insert(LOCAL_SCHEME, Arc::new(LocalFSHandler));
+        let mut map: HashMap<String, Arc<dyn ProtocolHandler>> = HashMap::new();
+        map.insert(LOCAL_SCHEME.to_string(), Arc::new(LocalFSHandler));
 
         Self {
             protocol_handlers: RwLock::new(map),

@@ -37,7 +37,7 @@ pub struct ParquetRootDesc {
 }
 
 impl ParquetRootDesc {
-    pub fn new(root_path: &str) -> Self {
+    pub fn new(root_path: &str) -> Result<Self> {
         let handler = ExecutionContext::get()
             .state
             .lock()
@@ -45,10 +45,10 @@ impl ParquetRootDesc {
             .protocol_registry
             .handler_for_path(root_path);
         let root_desc = Self::get_source_desc(root_path, handler.clone(), "parquet");
-        Self {
+        Ok(Self {
             protocol_handler: handler,
             descriptor: root_desc?,
-        }
+        })
     }
 
     pub fn schema(&self) -> SchemaRef {

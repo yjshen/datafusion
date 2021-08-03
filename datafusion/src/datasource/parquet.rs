@@ -45,7 +45,7 @@ impl ParquetTable {
         let path = path.into();
         let root_desc = ParquetRootDesc::new(path.as_str());
         Ok(Self {
-            desc: Arc::new(root_desc),
+            desc: Arc::new(root_desc?),
             max_concurrency,
             enable_pruning: true,
         })

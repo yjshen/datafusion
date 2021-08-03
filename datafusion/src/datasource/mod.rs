@@ -36,10 +36,7 @@ use crate::datasource::datasource::{ColumnStatistics, Statistics};
 use crate::datasource::protocol_registry::ProtocolHandler;
 use crate::error::{DataFusionError, Result};
 use crate::scalar::ScalarValue;
-use std::io::{Read, Seek};
 use std::sync::Arc;
-
-pub(crate) trait ReadSeek: Read + Seek + Send + Sync {}
 
 /// Source for table input data
 pub(crate) enum Source<R = Box<dyn std::io::Read + Send + Sync + 'static>> {
@@ -60,10 +57,37 @@ pub struct PartitionedFile {
     // We may include row group range here for a more fine-grained parallel execution
 }
 
+impl std::fmt::Display for PartitionedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "PartitionedFile(file_path: {}, schema: {}, statistics: {:?},\
+         partition_value: {:?}, partition_schema: {:?})",
+            self.file_path,
+            self.schema,
+            self.statistics,
+            self.partition_value,
+            self.partition_schema
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FilePartition {
     pub index: usize,
     pub files: Vec<PartitionedFile>,
+}
+
+impl std::fmt::Display for FilePartition {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let files: Vec<String> = self.files.iter().map(|f| format!("{}", f)).collect();
+        write!(
+            f,
+            "FilePartition[{}], files: {}",
+            self.index,
+            files.join(", ")
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +151,7 @@ pub fn get_statistics_with_limit(
     limit: Option<usize>,
 ) -> (Vec<PartitionedFile>, Statistics) {
     let mut all_files = source_desc.partition_files.clone();
-    let schema = Arc::new(all_files.first()?.schema.clone());
+    let schema = source_desc.schema.clone();
 
     let mut total_byte_size = 0;
     let mut null_counts = vec![0; schema.fields().len()];

@@ -21,6 +21,8 @@ use crate::error::Result;
 use std::any::Any;
 use std::fs;
 use std::fs::{metadata, File};
+use std::sync::Arc;
+use parquet::file::reader::ChunkReader;
 
 pub struct LocalFSHandler;
 
@@ -30,11 +32,15 @@ impl ProtocolHandler for LocalFSHandler {
     }
 
     fn list_all_files(&self, root_path: &str, ext: &str) -> Result<Vec<String>> {
-        list_all(root_path, ext);
+        list_all(root_path, ext)
     }
 
-    fn get_reader(&self, file_path: &str) -> Result<File> {
-        Ok(File::open(file_path)?)
+    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ChunkReader>> {
+        Ok(Arc::new(File::open(file_path)?))
+    }
+
+    fn handler_name(&self) -> String {
+        "LocalFSHandler".to_string()
     }
 }
 
