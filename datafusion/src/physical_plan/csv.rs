@@ -18,7 +18,7 @@
 //! Execution plan for reading CSV files
 
 use crate::datasource::local::LocalFSHandler;
-use crate::datasource::protocol_registry::ProtocolHandler;
+use crate::datasource::object_store::ObjectStore;
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::ExecutionPlan;
 use crate::physical_plan::{source::Source, Partitioning};

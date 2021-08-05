@@ -61,8 +61,8 @@ use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
 
 use super::SQLMetric;
+use crate::datasource::object_store::ObjectStore;
 use crate::datasource::parquet_desc::ParquetRootDesc;
-use crate::datasource::protocol_registry::ProtocolHandler;
 use crate::datasource::{get_statistics_with_limit, FilePartition, PartitionedFile};
 
 /// Execution plan for scanning one or more Parquet partitions
@@ -71,7 +71,7 @@ pub struct ParquetExec {
     /// Parquet partitions to read
     partitions: Vec<ParquetPartition>,
     /// Source used for get reader for partitions
-    handler: Arc<dyn ProtocolHandler>,
+    handler: Arc<dyn ObjectStore>,
     /// Schema after projection is applied
     schema: SchemaRef,
     /// Projection for which columns to load
@@ -201,7 +201,7 @@ impl ParquetExec {
     /// Create a new Parquet reader execution plan with provided partitions and schema
     pub fn new(
         partitions: Vec<ParquetPartition>,
-        handler: Arc<dyn ProtocolHandler>,
+        handler: Arc<dyn ObjectStore>,
         schema: SchemaRef,
         projection: Option<Vec<usize>>,
         statistics: Statistics,
@@ -557,7 +557,7 @@ fn build_row_group_predicate(
 }
 
 fn read_files(
-    handler: Arc<dyn ProtocolHandler>,
+    handler: Arc<dyn ObjectStore>,
     partition: ParquetPartition,
     metrics: ParquetPartitionMetrics,
     projection: &[usize],
@@ -569,8 +569,9 @@ fn read_files(
     let mut total_rows = 0;
     let all_files = partition.file_partition.files;
     'outer: for partitioned_file in all_files {
-        let reader = handler.get_reader(partitioned_file.file_path.as_str())?;
-        let mut file_reader = SerializedFileReader::new(reader)?;
+        let reader =
+            handler.get_reader(partitioned_file.file_path.as_str())?;
+        let mut file_reader = SerializedFileReader::new(*reader)?;
         if let Some(predicate_builder) = predicate_builder {
             let row_group_predicate = build_row_group_predicate(
                 predicate_builder,

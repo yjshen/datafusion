@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::datasource::protocol_registry::ProtocolHandler;
+use crate::datasource::object_store::{ObjectStore, ObjectReader};
 use crate::error::DataFusionError;
 use crate::error::Result;
 use parquet::file::reader::ChunkReader;
@@ -23,10 +23,12 @@ use std::any::Any;
 use std::fs;
 use std::fs::{metadata, File};
 use std::sync::Arc;
+use crate::parquet::file::reader::Length;
 
+#[derive(Debug)]
 pub struct LocalFSHandler;
 
-impl ProtocolHandler<File> for LocalFSHandler {
+impl ObjectStore for LocalFSHandler {
     fn as_any(&self) -> &dyn Any {
         return self;
     }
@@ -35,12 +37,48 @@ impl ProtocolHandler<File> for LocalFSHandler {
         list_all(root_path, ext)
     }
 
-    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ChunkReader<T = File>>> {
-        Ok(Arc::new(File::open(file_path)?))
+    fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ObjectReader>> {
+        let file = File::open(file_path)?;
+        let reader = LocalFSObjectReader::new(file)?;
+        Ok(Arc::new(reader))
     }
 
     fn handler_name(&self) -> String {
         "LocalFSHandler".to_string()
+    }
+}
+
+struct LocalFSObjectReader {
+    file: File,
+}
+
+impl LocalFSObjectReader {
+    fn new(file: File) -> Result<Self> {
+        Ok(Self { file })
+    }
+}
+
+impl ObjectReader for LocalFSObjectReader {
+    fn get_iter(&self) -> Box<dyn Iterator<Item=u8>> {
+        todo!()
+    }
+
+    fn len1(&self) -> u64 {
+        self.len()
+    }
+}
+
+impl ChunkReader for LocalFSObjectReader {
+    type T = File;
+
+    fn get_read(&self, start: u64, length: usize) -> parquet::errors::Result<Self::T> {
+        Ok(self.file)
+    }
+}
+
+impl Length for LocalFSObjectReader {
+    fn len(&self) -> u64 {
+        self.file.len()
     }
 }
 

@@ -23,9 +23,9 @@ pub mod empty;
 pub mod json;
 pub mod local;
 pub mod memory;
+pub mod object_store;
 pub mod parquet;
 pub mod parquet_desc;
-pub mod protocol_registry;
 
 pub use self::csv::{CsvFile, CsvReadOptions};
 pub use self::datasource::{TableProvider, TableType};
@@ -33,7 +33,7 @@ pub use self::memory::MemTable;
 
 use crate::arrow::datatypes::{Schema, SchemaRef};
 use crate::datasource::datasource::{ColumnStatistics, Statistics};
-use crate::datasource::protocol_registry::ProtocolHandler;
+use crate::datasource::object_store::ObjectStore;
 use crate::error::{DataFusionError, Result};
 use crate::scalar::ScalarValue;
 use std::sync::Arc;
@@ -99,10 +99,10 @@ pub struct SourceRootDescriptor {
 pub trait SourceRootDescBuilder {
     fn get_source_desc(
         root_path: &str,
-        handler: Arc<dyn ProtocolHandler>,
+        object_store: Arc<dyn ObjectStore>,
         ext: &str,
     ) -> Result<SourceRootDescriptor> {
-        let filenames = handler.list_all_files(root_path, ext)?;
+        let filenames = object_store.list_all_files(root_path, ext)?;
         if filenames.is_empty() {
             return Err(DataFusionError::Plan(format!(
                 "No file (with .{} extension) found at path {}",
@@ -117,7 +117,7 @@ pub trait SourceRootDescBuilder {
         let partitioned_files = filenames
             .iter()
             .map(|file_path| {
-                let pf = Self::get_file_meta(file_path, handler)?;
+                let pf = Self::get_file_meta(file_path, object_store)?;
                 let schema = pf.schema.clone();
                 if schemas.is_empty() {
                     schemas.push(schema);
@@ -142,7 +142,7 @@ pub trait SourceRootDescBuilder {
 
     fn get_file_meta(
         file_path: &str,
-        handler: Arc<dyn ProtocolHandler>,
+        object_store: Arc<dyn ObjectStore>,
     ) -> Result<PartitionedFile>;
 }
 

@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::datasource::datasource::Statistics;
 use crate::datasource::local::LocalFSHandler;
-use crate::datasource::protocol_registry::ProtocolHandler;
+use crate::datasource::object_store::ObjectStore;
 use crate::datasource::{Source, TableProvider};
 use crate::error::{DataFusionError, Result};
 use crate::logical_plan::Expr;

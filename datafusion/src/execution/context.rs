@@ -49,9 +49,9 @@ use crate::catalog::{
     ResolvedTableReference, TableReference,
 };
 use crate::datasource::csv::CsvFile;
+use crate::datasource::object_store::ObjectStore;
+use crate::datasource::object_store::ObjectStoreRegistry;
 use crate::datasource::parquet::ParquetTable;
-use crate::datasource::protocol_registry::ProtocolHandler;
-use crate::datasource::protocol_registry::ProtocolRegistry;
 use crate::datasource::TableProvider;
 use crate::error::{DataFusionError, Result};
 use crate::execution::dataframe_impl::DataFrameImpl;
@@ -180,7 +180,7 @@ impl ExecutionContext {
                 aggregate_functions: HashMap::new(),
                 config,
                 execution_props: ExecutionProps::new(),
-                protocol_registry: ProtocolRegistry::new(),
+                protocol_registry: ObjectStoreRegistry::new(),
             })),
         }
     }
@@ -378,13 +378,13 @@ impl ExecutionContext {
     pub fn register_protocol_handler(
         &self,
         prefix: &str,
-        handler: Arc<dyn ProtocolHandler>,
-    ) -> Option<Arc<dyn ProtocolHandler>> {
+        handler: Arc<dyn ObjectStore>,
+    ) -> Option<Arc<dyn ObjectStore>> {
         self.state
             .lock()
             .unwrap()
             .protocol_registry
-            .register_handler(prefix, handler)
+            .register_store(prefix, handler)
     }
 
     /// Retrieves a `CatalogProvider` instance by name
@@ -870,7 +870,7 @@ pub struct ExecutionContextState {
     /// Execution properties
     pub execution_props: ExecutionProps,
     /// Protocol handlers
-    pub protocol_registry: ProtocolRegistry,
+    pub protocol_registry: ObjectStoreRegistry,
 }
 
 impl ExecutionProps {
@@ -898,7 +898,7 @@ impl ExecutionContextState {
             aggregate_functions: HashMap::new(),
             config: ExecutionConfig::new(),
             execution_props: ExecutionProps::new(),
-            protocol_registry: ProtocolRegistry::new(),
+            protocol_registry: ObjectStoreRegistry::new(),
         }
     }
 

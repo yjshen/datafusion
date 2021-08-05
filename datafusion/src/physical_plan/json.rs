@@ -21,7 +21,7 @@ use futures::Stream;
 
 use super::{source::Source, ExecutionPlan, Partitioning, RecordBatchStream};
 use crate::datasource::local::LocalFSHandler;
-use crate::datasource::protocol_registry::ProtocolHandler;
+use crate::datasource::object_store::ObjectStore;
 use crate::error::{DataFusionError, Result};
 use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
 use arrow::{

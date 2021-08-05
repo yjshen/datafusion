@@ -16,7 +16,7 @@
 // under the License.
 
 use crate::datasource::datasource::{ColumnStatistics, Statistics};
-use crate::datasource::protocol_registry::ProtocolHandler;
+use crate::datasource::object_store::{ObjectStore, ObjectReader};
 use crate::datasource::{
     get_statistics_with_limit, PartitionedFile, SourceRootDescBuilder,
     SourceRootDescriptor,
@@ -29,24 +29,25 @@ use parquet::arrow::ArrowReader;
 use parquet::arrow::ParquetFileArrowReader;
 use parquet::file::serialized_reader::SerializedFileReader;
 use std::sync::Arc;
+use crate::parquet::file::reader::Length;
 
 #[derive(Debug)]
 pub struct ParquetRootDesc {
-    pub protocol_handler: Arc<dyn ProtocolHandler>,
+    pub object_store: Arc<dyn ObjectStore>,
     pub descriptor: SourceRootDescriptor,
 }
 
 impl ParquetRootDesc {
     pub fn new(root_path: &str) -> Result<Self> {
-        let handler = ExecutionContext::get()
+        let object_store = ExecutionContext::get()
             .state
             .lock()
             .unwrap()
             .protocol_registry
-            .handler_for_path(root_path);
-        let root_desc = Self::get_source_desc(root_path, handler.clone(), "parquet");
+            .store_for_path(root_path);
+        let root_desc = Self::get_source_desc(root_path, object_store.clone(), "parquet");
         Ok(Self {
-            protocol_handler: handler,
+            object_store,
             descriptor: root_desc?,
         })
     }
@@ -63,9 +64,9 @@ impl ParquetRootDesc {
 impl SourceRootDescBuilder for ParquetRootDesc {
     fn get_file_meta(
         file_path: &str,
-        handler: Arc<dyn ProtocolHandler>,
+        object_store: Arc<dyn ObjectStore>,
     ) -> Result<PartitionedFile> {
-        let reader = handler.get_reader(file_path)?;
+        let reader = object_store.get_reader(file_path)?;
         let file_reader = Arc::new(SerializedFileReader::new(reader)?);
         let mut arrow_reader = ParquetFileArrowReader::new(file_reader);
         let file_path = file_path.to_string();
