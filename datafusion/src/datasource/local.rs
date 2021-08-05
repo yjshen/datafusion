@@ -15,15 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::datasource::object_store::{ObjectStore, ObjectReader};
+use crate::datasource::object_store::{ObjectReader, ObjectStore};
 use crate::error::DataFusionError;
 use crate::error::Result;
-use parquet::file::reader::ChunkReader;
+use crate::parquet::file::reader::Length;
 use std::any::Any;
 use std::fs;
 use std::fs::{metadata, File};
 use std::sync::Arc;
-use crate::parquet::file::reader::Length;
 
 #[derive(Debug)]
 pub struct LocalFSHandler;
@@ -59,25 +58,11 @@ impl LocalFSObjectReader {
 }
 
 impl ObjectReader for LocalFSObjectReader {
-    fn get_iter(&self) -> Box<dyn Iterator<Item=u8>> {
+    fn get_iter(&self) -> Box<dyn Iterator<Item = u8>> {
         todo!()
     }
 
     fn len1(&self) -> u64 {
-        self.len()
-    }
-}
-
-impl ChunkReader for LocalFSObjectReader {
-    type T = File;
-
-    fn get_read(&self, start: u64, length: usize) -> parquet::errors::Result<Self::T> {
-        Ok(self.file)
-    }
-}
-
-impl Length for LocalFSObjectReader {
-    fn len(&self) -> u64 {
         self.file.len()
     }
 }

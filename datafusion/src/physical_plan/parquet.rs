@@ -62,7 +62,7 @@ use futures::stream::{Stream, StreamExt};
 
 use super::SQLMetric;
 use crate::datasource::object_store::ObjectStore;
-use crate::datasource::parquet_desc::ParquetRootDesc;
+use crate::datasource::parquet_desc::{ParquetRootDesc, X};
 use crate::datasource::{get_statistics_with_limit, FilePartition, PartitionedFile};
 
 /// Execution plan for scanning one or more Parquet partitions
@@ -569,9 +569,8 @@ fn read_files(
     let mut total_rows = 0;
     let all_files = partition.file_partition.files;
     'outer: for partitioned_file in all_files {
-        let reader =
-            handler.get_reader(partitioned_file.file_path.as_str())?;
-        let mut file_reader = SerializedFileReader::new(*reader)?;
+        let reader = handler.get_reader(partitioned_file.file_path.as_str())?;
+        let mut file_reader = SerializedFileReader::new(X::new(reader))?;
         if let Some(predicate_builder) = predicate_builder {
             let row_group_predicate = build_row_group_predicate(
                 predicate_builder,

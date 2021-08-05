@@ -16,7 +16,7 @@
 // under the License.
 
 use crate::datasource::datasource::{ColumnStatistics, Statistics};
-use crate::datasource::object_store::{ObjectStore, ObjectReader};
+use crate::datasource::object_store::{ObjectReader, ObjectStore};
 use crate::datasource::{
     get_statistics_with_limit, PartitionedFile, SourceRootDescBuilder,
     SourceRootDescriptor,
@@ -25,16 +25,48 @@ use crate::error::Result;
 use crate::execution::context::ExecutionContext;
 use arrow::datatypes::SchemaRef;
 
+use crate::parquet::file::reader::Length;
 use parquet::arrow::ArrowReader;
 use parquet::arrow::ParquetFileArrowReader;
+use parquet::file::reader::ChunkReader;
 use parquet::file::serialized_reader::SerializedFileReader;
+use std::io::Read;
 use std::sync::Arc;
-use crate::parquet::file::reader::Length;
 
 #[derive(Debug)]
 pub struct ParquetRootDesc {
     pub object_store: Arc<dyn ObjectStore>,
     pub descriptor: SourceRootDescriptor,
+}
+
+pub struct X {
+    or: Arc<dyn ObjectReader>,
+}
+
+impl X {
+    pub fn new(or: Arc<dyn ObjectReader>) -> Self {
+        Self { or }
+    }
+}
+
+impl Read for X {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        todo!()
+    }
+}
+
+impl ChunkReader for X {
+    type T = Self;
+
+    fn get_read(&self, start: u64, length: usize) -> parquet::errors::Result<Self::T> {
+        todo!()
+    }
+}
+
+impl Length for X {
+    fn len(&self) -> u64 {
+        todo!()
+    }
 }
 
 impl ParquetRootDesc {
@@ -67,7 +99,7 @@ impl SourceRootDescBuilder for ParquetRootDesc {
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<PartitionedFile> {
         let reader = object_store.get_reader(file_path)?;
-        let file_reader = Arc::new(SerializedFileReader::new(reader)?);
+        let file_reader = Arc::new(SerializedFileReader::new(X::new(reader))?);
         let mut arrow_reader = ParquetFileArrowReader::new(file_reader);
         let file_path = file_path.to_string();
         let schema = arrow_reader.get_schema()?;

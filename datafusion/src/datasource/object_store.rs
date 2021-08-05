@@ -20,12 +20,11 @@ use crate::error::Result;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::io::Read;
 use std::sync::{Arc, RwLock};
 
 pub trait ObjectReader {
     fn get_iter(&self) -> Box<dyn Iterator<Item = u8>>;
-    fn len1(& self) -> u64;
+    fn len1(&self) -> u64;
 }
 
 /// A ObjectStore abstracts access to an underlying file/object storage.
