@@ -35,7 +35,7 @@ use std::string::String;
 use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Mutex, RwLock},
+    sync::Mutex,
 };
 
 use futures::{StreamExt, TryStreamExt};
@@ -127,24 +127,10 @@ pub struct ExecutionContext {
     pub state: Arc<Mutex<ExecutionContextState>>,
 }
 
-lazy_static! {
-    static ref CONTEXT: RwLock<Arc<ExecutionContext>> =
-        RwLock::new(Arc::new(ExecutionContext::new()));
-}
-
 impl ExecutionContext {
     /// Creates a new execution context using a default configuration.
     pub fn new() -> Self {
         Self::with_config(ExecutionConfig::new())
-    }
-
-    pub fn get() -> Arc<Self> {
-        CONTEXT.read().unwrap().clone()
-    }
-
-    pub fn set(context: ExecutionContext) {
-        let mut current_context = CONTEXT.write().unwrap();
-        *current_context = Arc::new(context);
     }
 
     /// Creates a new execution context using the provided configuration.
@@ -180,7 +166,7 @@ impl ExecutionContext {
                 aggregate_functions: HashMap::new(),
                 config,
                 execution_props: ExecutionProps::new(),
-                protocol_registry: ObjectStoreRegistry::new(),
+                object_store_registry: Arc::new(ObjectStoreRegistry::new()),
             })),
         }
     }
@@ -375,16 +361,23 @@ impl ExecutionContext {
         state.catalog_list.register_catalog(name, catalog)
     }
 
-    pub fn register_protocol_handler(
+    /// Registers a object store with scheme using a custom `ObjectStore` so that
+    /// an external file system or object storage system could be used against this context.
+    ///
+    /// Returns the `ObjectStore` previously registered for this
+    /// scheme, if any
+    pub fn register_object_store(
         &self,
-        prefix: &str,
-        handler: Arc<dyn ObjectStore>,
+        scheme: impl Into<String>,
+        object_store: Arc<dyn ObjectStore>,
     ) -> Option<Arc<dyn ObjectStore>> {
+        let scheme = scheme.into();
+
         self.state
             .lock()
             .unwrap()
-            .protocol_registry
-            .register_store(prefix, handler)
+            .object_store_registry
+            .register_store(scheme, object_store)
     }
 
     /// Retrieves a `CatalogProvider` instance by name
@@ -869,8 +862,8 @@ pub struct ExecutionContextState {
     pub config: ExecutionConfig,
     /// Execution properties
     pub execution_props: ExecutionProps,
-    /// Protocol handlers
-    pub protocol_registry: ObjectStoreRegistry,
+    /// Object Store that are registered with the context
+    pub object_store_registry: Arc<ObjectStoreRegistry>,
 }
 
 impl ExecutionProps {
@@ -898,7 +891,7 @@ impl ExecutionContextState {
             aggregate_functions: HashMap::new(),
             config: ExecutionConfig::new(),
             execution_props: ExecutionProps::new(),
-            protocol_registry: ObjectStoreRegistry::new(),
+            object_store_registry: Arc::new(ObjectStoreRegistry::new()),
         }
     }
 

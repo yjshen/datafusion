@@ -71,7 +71,7 @@ pub struct ParquetExec {
     /// Parquet partitions to read
     partitions: Vec<ParquetPartition>,
     /// Source used for get reader for partitions
-    handler: Arc<dyn ObjectStore>,
+    object_store: Arc<dyn ObjectStore>,
     /// Schema after projection is applied
     schema: SchemaRef,
     /// Projection for which columns to load
@@ -187,7 +187,7 @@ impl ParquetExec {
 
         Ok(Self::new(
             partitions,
-            desc.protocol_handler.clone(),
+            desc.object_store.clone(),
             schema,
             projection,
             statistics,
@@ -201,7 +201,7 @@ impl ParquetExec {
     /// Create a new Parquet reader execution plan with provided partitions and schema
     pub fn new(
         partitions: Vec<ParquetPartition>,
-        handler: Arc<dyn ObjectStore>,
+        object_store: Arc<dyn ObjectStore>,
         schema: SchemaRef,
         projection: Option<Vec<usize>>,
         statistics: Statistics,
@@ -239,7 +239,7 @@ impl ParquetExec {
 
         Self {
             partitions,
-            handler,
+            object_store: object_store,
             schema: Arc::new(projected_schema),
             projection,
             metrics,
@@ -362,7 +362,7 @@ impl ExecutionPlan for ParquetExec {
 
         task::spawn_blocking(move || {
             if let Err(e) = read_files(
-                self.handler.clone(),
+                self.object_store.clone(),
                 partition,
                 metrics,
                 &projection,

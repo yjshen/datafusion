@@ -61,7 +61,7 @@ impl ObjectStoreRegistry {
     /// If a store of the same prefix existed before, it is replaced in the registry and returned.
     pub fn register_store(
         &self,
-        scheme: &str,
+        scheme: String,
         store: Arc<dyn ObjectStore>,
     ) -> Option<Arc<dyn ObjectStore>> {
         let mut stores = self.object_stores.write().unwrap();
