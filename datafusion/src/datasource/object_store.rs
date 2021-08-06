@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::datasource::local::LocalFSHandler;
+use crate::datasource::local::LocalFileSystem;
 use crate::error::Result;
 use std::any::Any;
 use std::collections::HashMap;
@@ -23,22 +23,20 @@ use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
 
 pub trait ObjectReader {
-    fn get_iter(&self) -> Box<dyn Iterator<Item = u8>>;
-    fn len1(&self) -> u64;
+    fn as_iter(&self, start: u64, length: usize) -> Box<dyn Iterator<Item = u8>>;
+    fn length(&self) -> u64;
 }
 
 /// A ObjectStore abstracts access to an underlying file/object storage.
 /// It maps strings (e.g. URLs, filesystem paths, etc) to sources of bytes
 pub trait ObjectStore: Sync + Send + Debug {
-    /// Returns the protocol handler as [`Any`](std::any::Any)
+    /// Returns the object store as [`Any`](std::any::Any)
     /// so that it can be downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
 
-    fn list_all_files(&self, path: &str, ext: &str) -> Result<Vec<String>>;
+    fn list_all_files(&self, prefix: &str, ext: &str) -> Result<Vec<String>>;
 
     fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ObjectReader>>;
-
-    fn handler_name(&self) -> String;
 }
 
 static LOCAL_SCHEME: &str = "file";
@@ -50,7 +48,7 @@ pub struct ObjectStoreRegistry {
 impl ObjectStoreRegistry {
     pub fn new() -> Self {
         let mut map: HashMap<String, Arc<dyn ObjectStore>> = HashMap::new();
-        map.insert(LOCAL_SCHEME.to_string(), Arc::new(LocalFSHandler));
+        map.insert(LOCAL_SCHEME.to_string(), Arc::new(LocalFileSystem));
 
         Self {
             object_stores: RwLock::new(map),
@@ -80,8 +78,8 @@ impl ObjectStoreRegistry {
     pub fn store_for_path(&self, path: &str) -> Arc<dyn ObjectStore> {
         if let Some((scheme, _)) = path.split_once(':') {
             let stores = self.object_stores.read().unwrap();
-            if let Some(handler) = stores.get(&*scheme.to_lowercase()) {
-                return handler.clone();
+            if let Some(store) = stores.get(&*scheme.to_lowercase()) {
+                return store.clone();
             }
         }
         self.object_stores

@@ -23,27 +23,24 @@ use std::any::Any;
 use std::fs;
 use std::fs::{metadata, File};
 use std::sync::Arc;
+use std::io::BufReader;
 
 #[derive(Debug)]
-pub struct LocalFSHandler;
+pub struct LocalFileSystem;
 
-impl ObjectStore for LocalFSHandler {
+impl ObjectStore for LocalFileSystem {
     fn as_any(&self) -> &dyn Any {
         return self;
     }
 
-    fn list_all_files(&self, root_path: &str, ext: &str) -> Result<Vec<String>> {
-        list_all(root_path, ext)
+    fn list_all_files(&self, path: &str, ext: &str) -> Result<Vec<String>> {
+        list_all(path, ext)
     }
 
     fn get_reader(&self, file_path: &str) -> Result<Arc<dyn ObjectReader>> {
         let file = File::open(file_path)?;
         let reader = LocalFSObjectReader::new(file)?;
         Ok(Arc::new(reader))
-    }
-
-    fn handler_name(&self) -> String {
-        "LocalFSHandler".to_string()
     }
 }
 
@@ -57,14 +54,50 @@ impl LocalFSObjectReader {
     }
 }
 
+struct FileSegment {
+    reader: BufReader<File>,
+    start: u64,
+    length: usize,
+}
+
+impl FileSegment {
+    fn new(file: File, start: u64, length: usize) -> Self {
+        Self {
+            reader: BufReader::new(file),
+            start,
+            length,
+        }
+    }
+}
+
+impl ExactSizeIterator for FileSegment {
+    fn len(&self) -> usize {
+        self.length
+    }
+}
+
+impl Iterator for FileSegment {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.reader.read_u8().ok()
+    }
+}
+
 impl ObjectReader for LocalFSObjectReader {
-    fn get_iter(&self) -> Box<dyn Iterator<Item = u8>> {
-        todo!()
+    fn as_iter(&self, start: u64, length: usize) -> Box<dyn Iterator<Item = u8>> {
+        Box::new(FileSegment::new(self.file.try_clone().unwrap(), start, length))
     }
 
-    fn len1(&self) -> u64 {
+    fn length(&self) -> u64 {
         self.file.len()
     }
+}
+
+fn list_all(root_path: &str, ext: &str) -> Result<Vec<String>> {
+    let mut filenames: Vec<String> = Vec::new();
+    list_all_files(root_path, &mut filenames, ext);
+    Ok(filenames)
 }
 
 /// Recursively build a list of files in a directory with a given extension with an accumulator list
@@ -90,10 +123,4 @@ fn list_all_files(dir: &str, filenames: &mut Vec<String>, ext: &str) -> Result<(
         }
     }
     Ok(())
-}
-
-fn list_all(root_path: &str, ext: &str) -> Result<Vec<String>> {
-    let mut filenames: Vec<String> = Vec::new();
-    list_all_files(root_path, &mut filenames, ext);
-    Ok(filenames)
 }

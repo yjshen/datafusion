@@ -40,12 +40,12 @@ pub struct ParquetRootDesc {
 }
 
 pub struct X {
-    or: Arc<dyn ObjectReader>,
+    reader: Arc<dyn ObjectReader>,
 }
 
 impl X {
     pub fn new(or: Arc<dyn ObjectReader>) -> Self {
-        Self { or }
+        Self { reader: or }
     }
 }
 

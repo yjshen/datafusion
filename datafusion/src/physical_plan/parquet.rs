@@ -557,7 +557,7 @@ fn build_row_group_predicate(
 }
 
 fn read_files(
-    handler: Arc<dyn ObjectStore>,
+    object_store: Arc<dyn ObjectStore>,
     partition: ParquetPartition,
     metrics: ParquetPartitionMetrics,
     projection: &[usize],
@@ -569,7 +569,7 @@ fn read_files(
     let mut total_rows = 0;
     let all_files = partition.file_partition.files;
     'outer: for partitioned_file in all_files {
-        let reader = handler.get_reader(partitioned_file.file_path.as_str())?;
+        let reader = object_store.get_reader(partitioned_file.file_path.as_str())?;
         let mut file_reader = SerializedFileReader::new(X::new(reader))?;
         if let Some(predicate_builder) = predicate_builder {
             let row_group_predicate = build_row_group_predicate(
