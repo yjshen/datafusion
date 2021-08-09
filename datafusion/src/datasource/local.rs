@@ -22,8 +22,8 @@ use crate::parquet::file::reader::Length;
 use std::any::Any;
 use std::fs;
 use std::fs::{metadata, File};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
-use std::io::BufReader;
 
 #[derive(Debug)]
 pub struct LocalFileSystem;
@@ -54,39 +54,37 @@ impl LocalFSObjectReader {
     }
 }
 
-struct FileSegment {
+struct FileSegmentReader {
     reader: BufReader<File>,
     start: u64,
     length: usize,
 }
 
-impl FileSegment {
+impl FileSegmentReader {
     fn new(file: File, start: u64, length: usize) -> Self {
+        let mut reader = BufReader::new(file);
+        reader.seek(SeekFrom::Current(start as i64));
         Self {
-            reader: BufReader::new(file),
+            reader,
             start,
             length,
         }
     }
 }
 
-impl ExactSizeIterator for FileSegment {
-    fn len(&self) -> usize {
-        self.length
-    }
-}
-
-impl Iterator for FileSegment {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.reader.read_u8().ok()
+impl Read for FileSegmentReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
+        self.reader.read(buf)
     }
 }
 
 impl ObjectReader for LocalFSObjectReader {
-    fn as_iter(&self, start: u64, length: usize) -> Box<dyn Iterator<Item = u8>> {
-        Box::new(FileSegment::new(self.file.try_clone().unwrap(), start, length))
+    fn get_reader(&self, start: u64, length: usize) -> Box<dyn Read> {
+        Box::new(FileSegmentReader::new(
+            self.file.try_clone().unwrap(),
+            start,
+            length,
+        ))
     }
 
     fn length(&self) -> u64 {

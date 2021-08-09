@@ -20,10 +20,12 @@ use crate::error::Result;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::io::Read;
 use std::sync::{Arc, RwLock};
 
 pub trait ObjectReader {
-    fn as_iter(&self, start: u64, length: usize) -> Box<dyn Iterator<Item = u8>>;
+    fn get_reader(&self, start: u64, length: usize) -> Box<dyn Read>;
+
     fn length(&self) -> u64;
 }
 

@@ -39,33 +39,39 @@ pub struct ParquetRootDesc {
     pub descriptor: SourceRootDescriptor,
 }
 
-pub struct X {
+pub struct ObjectReaderWrapper {
     reader: Arc<dyn ObjectReader>,
 }
 
-impl X {
-    pub fn new(or: Arc<dyn ObjectReader>) -> Self {
-        Self { reader: or }
+impl ObjectReaderWrapper {
+    pub fn new(reader: Arc<dyn ObjectReader>) -> Self {
+        Self { reader }
     }
 }
 
-impl Read for X {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        todo!()
+pub struct InnerReaderWrapper {
+    inner_reader: Box<dyn Read>,
+}
+
+impl Read for InnerReaderWrapper {
+    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
+        self.inner_reader.read(buf)
     }
 }
 
-impl ChunkReader for X {
-    type T = Self;
+impl ChunkReader for ObjectReaderWrapper {
+    type T = InnerReaderWrapper;
 
     fn get_read(&self, start: u64, length: usize) -> parquet::errors::Result<Self::T> {
-        todo!()
+        Ok(InnerReaderWrapper {
+            inner_reader: self.reader.get_reader(start, length),
+        })
     }
 }
 
-impl Length for X {
+impl Length for ObjectReaderWrapper {
     fn len(&self) -> u64 {
-        todo!()
+        self.reader.length()
     }
 }
 
@@ -99,7 +105,8 @@ impl SourceRootDescBuilder for ParquetRootDesc {
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<PartitionedFile> {
         let reader = object_store.get_reader(file_path)?;
-        let file_reader = Arc::new(SerializedFileReader::new(X::new(reader))?);
+        let file_reader =
+            Arc::new(SerializedFileReader::new(ObjectReaderWrapper::new(reader))?);
         let mut arrow_reader = ParquetFileArrowReader::new(file_reader);
         let file_path = file_path.to_string();
         let schema = arrow_reader.get_schema()?;
