@@ -132,5 +132,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, criterion_benchmark);
+criterion_group!(name = benches;
+    config = Criterion::default().measurement_time(std::time::Duration::from_secs(30));
+    targets = criterion_benchmark);
 criterion_main!(benches);

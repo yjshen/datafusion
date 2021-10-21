@@ -77,6 +77,7 @@ rand = "0.8"
 avro-rs = { version = "0.13", features = ["snappy"], optional = true }
 num-traits = { version = "0.2", optional = true }
 pyo3 = { version = "0.14", optional = true }
+tempfile = "3"
 
 [dependencies.arrow]
 package = "arrow2"
@@ -89,7 +90,6 @@ features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc
 
 [dev-dependencies]
 criterion = "0.3"
-tempfile = "3"
 doc-comment = "0.3"
 parquet-format-async-temp = "0"
 

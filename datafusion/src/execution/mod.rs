@@ -20,3 +20,6 @@
 pub mod context;
 pub mod dataframe_impl;
 pub mod options;
+pub mod disk_manager;
+pub mod memory_management;
+pub mod runtime_env;

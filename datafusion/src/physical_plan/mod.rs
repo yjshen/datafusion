@@ -625,6 +625,7 @@ pub mod empty;
 pub mod explain;
 pub mod expressions;
 pub mod file_format;
+pub mod external_sort;
 pub mod filter;
 pub mod functions;
 pub mod hash_aggregate;

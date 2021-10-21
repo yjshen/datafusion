@@ -15,9 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Defines the SORT plan
+//! Defines the External-Sort plan
 
-use super::common::AbortOnDropSingle;
 use super::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
@@ -41,10 +40,104 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use crate::execution::memory_management::{MemoryConsumer, MemoryConsumerId, MemoryManager, PartitionMemoryManager};
+use arrow::compute::aggregate::estimated_bytes_size;
+use crate::physical_plan::sort::sort_batch;
+use parking_lot::Mutex;
+use log::{debug, info};
+
+struct ExternalSorter {
+    id: MemoryConsumerId,
+    in_mem_batches: Vec<RecordBatch>,
+    spills: Vec<String>,
+    memory_manager: Arc<MemoryManager>,
+    used: usize,
+    spilled_bytes: usize,
+    spilled_count: usize,
+    lock: Mutex<()>,
+}
+
+pub fn batch_memory_size(rb: &RecordBatch) -> usize {
+    rb.columns().iter().map(|c| estimated_bytes_size(c.as_ref())).sum()
+}
+
+impl ExternalSorter {
+    pub fn new(partition_id: usize, memory_manager: Arc<MemoryManager>) -> Self {
+        Self {
+            id: MemoryConsumerId::new(partition_id),
+            in_mem_batches: vec![],
+            spills: vec![],
+            memory_manager,
+            used: 0,
+            spilled_bytes: 0,
+            spilled_count: 0,
+            lock: Mutex::new(()),
+        }
+    }
+
+    fn insert_batch(&mut self, input: RecordBatch, schema: SchemaRef, expr: &[PhysicalSortExpr]) -> Result<()> {
+        let size = batch_memory_size(&input);
+        self.allocate(size)?;
+        // sort each batch as it's inserted, more probably to be cache-resident
+        let sorted_batch = sort_batch(input, schema, expr)?;
+        self.lock.lock();
+        self.in_mem_batches.push(sorted_batch);
+    }
+}
+
+impl MemoryConsumer for ExternalSorter {
+    fn name(&self) -> String {
+        "ExternalSorter".to_owned()
+    }
+
+    fn id(&self) -> &MemoryConsumerId {
+        &self.id
+    }
+
+    fn manager(&self) -> Arc<MemoryManager> {
+        self.memory_manager.clone()
+    }
+
+    async fn spill(&self, _size: usize, _trigger: &dyn MemoryConsumer) -> usize {
+        self.lock.lock();
+
+        // we could always get a chance to free some memory as long as we are holding some
+        if self.in_mem_batches.len() == 0 {
+            return 0;
+        }
+
+        info!("{} spilling sort data of {} to disk ({} time(s) so far)",
+            self.str_repr(), self.get_used(), self.spilled_count);
+
+
+        0
+    }
+
+    fn get_used(&self) -> usize {
+        self.used
+    }
+
+    fn update_used(&mut self, delta: i64) -> Result<()> {
+        if delta > 0 {
+            self.used += delta;
+        } else {
+            self.used = self.used.checked_sub(-delta as usize)?;
+        }
+        Ok(())
+    }
+
+    fn spilled_bytes(&self) -> usize {
+        self.spilled_bytes
+    }
+
+    fn spilled_count(&self) -> usize {
+        self.spilled_count
+    }
+}
 
 /// Sort execution plan
 #[derive(Debug)]
-pub struct SortExec {
+pub struct ExternalSortExec {
     /// Input schema
     input: Arc<dyn ExecutionPlan>,
     /// Sort expressions
@@ -55,7 +148,7 @@ pub struct SortExec {
     preserve_partitioning: bool,
 }
 
-impl SortExec {
+impl ExternalSortExec {
     /// Create a new sort execution plan
     pub fn try_new(
         expr: Vec<PhysicalSortExpr>,
@@ -91,7 +184,7 @@ impl SortExec {
 }
 
 #[async_trait]
-impl ExecutionPlan for SortExec {
+impl ExecutionPlan for ExternalSortExec {
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self
@@ -127,7 +220,7 @@ impl ExecutionPlan for SortExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         match children.len() {
-            1 => Ok(Arc::new(SortExec::try_new(
+            1 => Ok(Arc::new(ExternalSorter::try_new(
                 self.expr.clone(),
                 children[0].clone(),
             )?)),
@@ -186,43 +279,42 @@ impl ExecutionPlan for SortExec {
     }
 }
 
-pub fn sort_batch(
-    batch: RecordBatch,
-    schema: SchemaRef,
-    expr: &[PhysicalSortExpr],
-) -> ArrowResult<RecordBatch> {
-    let columns = expr
-        .iter()
-        .map(|e| e.evaluate_to_sort_column(&batch))
-        .collect::<Result<Vec<_>>>()
-        .map_err(DataFusionError::into_arrow_external_error)?;
-    let columns = columns.iter().map(|x| x.into()).collect::<Vec<_>>();
-
-    let indices = lexsort_to_indices::<i32>(&columns, None)?;
-
-    // reorder all rows based on sorted indices
-    RecordBatch::try_new(
-        schema,
-        batch
-            .columns()
-            .iter()
-            .map(|column| take::take(column.as_ref(), &indices).map(|x| x.into()))
-            .collect::<ArrowResult<Vec<ArrayRef>>>()?,
-    )
-}
+// fn sort_batch(
+//     batch: RecordBatch,
+//     schema: SchemaRef,
+//     expr: &[PhysicalSortExpr],
+// ) -> ArrowResult<RecordBatch> {
+//     let columns = expr
+//         .iter()
+//         .map(|e| e.evaluate_to_sort_column(&batch))
+//         .collect::<Result<Vec<_>>>()
+//         .map_err(DataFusionError::into_arrow_external_error)?;
+//     let columns = columns.iter().map(|x| x.into()).collect::<Vec<_>>();
+//
+//     let indices = lexsort_to_indices::<i32>(&columns, None)?;
+//
+//     // reorder all rows based on sorted indices
+//     RecordBatch::try_new(
+//         schema,
+//         batch
+//             .columns()
+//             .iter()
+//             .map(|column| take::take(column.as_ref(), &indices).map(|x| x.into()))
+//             .collect::<ArrowResult<Vec<ArrayRef>>>()?,
+//     )
+// }
 
 pin_project! {
     /// stream for sort plan
-    struct SortStream {
+    struct ExternalSortStream {
         #[pin]
         output: futures::channel::oneshot::Receiver<ArrowResult<Option<RecordBatch>>>,
         finished: bool,
         schema: SchemaRef,
-        drop_helper: AbortOnDropSingle<()>,
     }
 }
 
-impl SortStream {
+impl ExternalSortStream {
     fn new(
         input: SendableRecordBatchStream,
         expr: Vec<PhysicalSortExpr>,
@@ -230,7 +322,7 @@ impl SortStream {
     ) -> Self {
         let (tx, rx) = futures::channel::oneshot::channel();
         let schema = input.schema();
-        let join_handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             let schema = input.schema();
             let sorted_batch = common::collect(input)
                 .await
@@ -240,7 +332,6 @@ impl SortStream {
                     // combine all record batches into one for each column
                     let combined = common::combine_batches(&batches, schema.clone())?;
                     // sort combined record batch
-                    // TODO: pushup the limit expression to sort
                     let result = combined
                         .map(|batch| sort_batch(batch, schema, &expr))
                         .transpose()?
@@ -249,20 +340,18 @@ impl SortStream {
                     Ok(result)
                 });
 
-            // failing here is OK, the receiver is gone and does not care about the result
-            tx.send(sorted_batch).ok();
+            tx.send(sorted_batch)
         });
 
         Self {
             output: rx,
             finished: false,
             schema,
-            drop_helper: AbortOnDropSingle::new(join_handle),
         }
     }
 }
 
-impl Stream for SortStream {
+impl Stream for ExternalSortStream {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -293,7 +382,7 @@ impl Stream for SortStream {
     }
 }
 
-impl RecordBatchStream for SortStream {
+impl RecordBatchStream for ExternalSortStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -302,45 +391,31 @@ impl RecordBatchStream for SortStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datasource::object_store::local::LocalFileSystem;
     use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
     use crate::physical_plan::expressions::col;
     use crate::physical_plan::memory::MemoryExec;
     use crate::physical_plan::{
         collect,
-        file_format::{CsvExec, PhysicalPlanConfig},
+        csv::{CsvExec, CsvReadOptions},
     };
-    use crate::test::assert_is_pending;
-    use crate::test::exec::assert_strong_count_converges_to_zero;
-    use crate::test::{self, exec::BlockingExec};
-    use crate::test_util;
+    use crate::test;
     use arrow::array::*;
     use arrow::datatypes::*;
-    use futures::FutureExt;
 
     #[tokio::test]
     async fn test_sort() -> Result<()> {
-        let schema = test_util::aggr_test_schema();
+        let schema = test::aggr_test_schema();
         let partitions = 4;
-        let (_, files) =
-            test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
+        let path = test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
+        let csv = CsvExec::try_new(
+            &path,
+            CsvReadOptions::new().schema(&schema),
+            None,
+            1024,
+            None,
+        )?;
 
-        let csv = CsvExec::new(
-            PhysicalPlanConfig {
-                object_store: Arc::new(LocalFileSystem {}),
-                file_schema: Arc::clone(&schema),
-                file_groups: files,
-                statistics: Statistics::default(),
-                projection: None,
-                batch_size: 1024,
-                limit: None,
-                table_partition_cols: vec![],
-            },
-            true,
-            b',',
-        );
-
-        let sort_exec = Arc::new(SortExec::try_new(
+        let sort_exec = Arc::new(ExternalSortExec::try_new(
             vec![
                 // c1 string column
                 PhysicalSortExpr {
@@ -418,7 +493,7 @@ mod tests {
             ],
         )?;
 
-        let sort_exec = Arc::new(SortExec::try_new(
+        let sort_exec = Arc::new(ExternalSortExec::try_new(
             vec![
                 PhysicalSortExpr {
                     expr: col("a", &schema)?,
@@ -484,31 +559,6 @@ mod tests {
         ];
 
         assert_eq!(expected, result);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_drop_cancel() -> Result<()> {
-        let schema =
-            Arc::new(Schema::new(vec![Field::new("a", DataType::Float32, true)]));
-
-        let blocking_exec = Arc::new(BlockingExec::new(Arc::clone(&schema), 1));
-        let refs = blocking_exec.refs();
-        let sort_exec = Arc::new(SortExec::try_new(
-            vec![PhysicalSortExpr {
-                expr: col("a", &schema)?,
-                options: SortOptions::default(),
-            }],
-            blocking_exec,
-        )?);
-
-        let fut = collect(sort_exec);
-        let mut fut = fut.boxed();
-
-        assert_is_pending(&mut fut);
-        drop(fut);
-        assert_strong_count_converges_to_zero(refs).await;
 
         Ok(())
     }

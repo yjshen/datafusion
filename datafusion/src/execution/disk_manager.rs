@@ -1,0 +1,95 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+use std::fs::File;
+use std::fs;
+use std::path::{Path, PathBuf};
+use crate::error::{DataFusionError, Result};
+use uuid::Uuid;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+pub struct DiskManager {
+    local_dirs: Vec<String>,
+}
+
+struct PathFile(String, File);
+
+impl DiskManager {
+
+    pub fn new(conf_dirs: &Vec<String>) -> Result<Self> {
+        Ok(Self {
+            local_dirs: create_local_dirs(conf_dirs)?,
+        })
+    }
+
+    fn create_tmp_file(&self) -> Result<PathFile> {
+        create_tmp_file(&self.local_dirs)
+    }
+
+    fn cleanupResource(&self) -> Result<()> {
+        for dir in self.local_dirs {
+            fs::remove_dir(dir)?;
+        }
+        Ok(())
+    }
+}
+
+
+/// Setup local dirs by creating one new dir in each of the given dirs
+fn create_local_dirs(local_dir: &Vec<String>) -> Result<Vec<String>> {
+    local_dir.into_iter().map(|root| create_directory(root, "datafusion")).collect()
+}
+
+const MAX_DIR_CREATION_ATTEMPTS: i32 = 10;
+
+fn create_directory(root: &str, prefix: &str) -> Result<String> {
+    let mut attempt = 0;
+    while attempt < MAX_DIR_CREATION_ATTEMPTS {
+        let mut path = PathBuf::from(root);
+        path.push(format!("{}-{}", prefix, Uuid::new_v4().to_string()));
+        let path = path.as_path();
+        if !path.exists() {
+            fs::create_dir(path)?;
+            return Ok(path.canonicalize().unwrap().to_str().unwrap().to_string());
+        }
+        attempt += 1;
+    }
+    Err(DataFusionError::Execution(
+        format!("Failed to create a temp dir under {} after {} attempts",
+                root, MAX_DIR_CREATION_ATTEMPTS)))
+}
+
+fn get_file(file_name: &str, local_dirs: &Vec<String>) -> String {
+    let mut hasher = DefaultHasher::new();
+    file_name.hash(&mut hasher);
+    let hash = hasher.finish();
+    let dir = local_dirs[hash.rem_euclid(local_dirs.len() as u64)];
+    let mut path = PathBuf::new();
+    path.push(dir);
+    path.push(file_name);
+    path.to_str().unwrap().to_string()
+}
+
+fn create_tmp_file(local_dirs: &Vec<String>) -> Result<PathFile> {
+    let name = Uuid::new_v4().to_string();
+    let mut path = get_file(&*name, local_dirs);
+    while path.exists() {
+        path = get_file(&*Uuid::new_v4().to_string(), local_dirs);
+    }
+    File::create(&path).map_err(|e| e.into()).map(|f| PathFile(path, f))
+}
