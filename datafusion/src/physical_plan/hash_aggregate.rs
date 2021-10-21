@@ -34,6 +34,7 @@ use crate::physical_plan::{
 };
 use crate::{
     error::{DataFusionError, Result},
+    execution::memory_management::MemoryConsumerId,
     scalar::ScalarValue,
 };
 
@@ -212,8 +213,11 @@ impl ExecutionPlan for HashAggregateExec {
 
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
 
+        let streamer_id = MemoryConsumerId::new(partition);
+
         if self.group_expr.is_empty() {
             Ok(Box::pin(HashAggregateStream::new(
+                streamer_id,
                 self.mode,
                 self.schema.clone(),
                 self.aggr_expr.clone(),
@@ -740,6 +744,7 @@ pin_project! {
 
 /// Special case aggregate with no groups
 async fn compute_hash_aggregate(
+    id: MemoryConsumerId,
     mode: AggregateMode,
     schema: SchemaRef,
     aggr_expr: Vec<Arc<dyn AggregateExpr>>,
@@ -776,6 +781,7 @@ async fn compute_hash_aggregate(
 impl HashAggregateStream {
     /// Create a new HashAggregateStream
     pub fn new(
+        id: MemoryConsumerId,
         mode: AggregateMode,
         schema: SchemaRef,
         aggr_expr: Vec<Arc<dyn AggregateExpr>>,
@@ -788,6 +794,7 @@ impl HashAggregateStream {
         let elapsed_compute = baseline_metrics.elapsed_compute().clone();
         tokio::spawn(async move {
             let result = compute_hash_aggregate(
+                id,
                 mode,
                 schema_clone,
                 aggr_expr,
