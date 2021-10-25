@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::execution::memory_management::MemoryManager;
-use crate::execution::disk_manager::DiskManager;
 use crate::error::{DataFusionError, Result};
+use crate::execution::disk_manager::DiskManager;
+use crate::execution::memory_management::MemoryManager;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -39,6 +39,10 @@ impl RuntimeEnv {
             memory_manager,
             disk_manager,
         })
+    }
+
+    pub fn batch_size(&self) -> usize {
+        self.config.batch_size
     }
 }
 
@@ -82,7 +86,11 @@ impl RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Result<Self> {
         let tmp_dir = tempfile::tempdir().map_err(|e| e.into())?;
-        let path = tmp_dir.path().to_str().ok_or_else(|e| e.into())?.to_string();
+        let path = tmp_dir
+            .path()
+            .to_str()
+            .ok_or_else(|e| e.into())?
+            .to_string();
         std::mem::forget(tmp_dir);
 
         Ok(Self {

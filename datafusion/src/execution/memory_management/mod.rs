@@ -17,17 +17,20 @@
 
 pub mod memory_pool;
 
+use crate::error::DataFusionError::OutOfMemory;
+use crate::error::{DataFusionError, Result};
+use crate::execution::disk_manager::DiskManager;
+use crate::execution::memory_management::memory_pool::{
+    ConstraintExecutionMemoryPool, DummyExecutionMemoryPool, ExecutionMemoryPool,
+};
 use async_trait::async_trait;
+use hashbrown::{HashMap, HashSet};
 use log::{debug, info};
+use parking_lot::Mutex;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::execution::memory_management::memory_pool::{ExecutionMemoryPool, DummyExecutionMemoryPool, ConstraintExecutionMemoryPool};
 use std::sync::Arc;
-use parking_lot::Mutex;
-use hashbrown::{HashMap, HashSet};
-use crate::error::{DataFusionError, Result};
-use crate::error::DataFusionError::OutOfMemory;
 
 static mut CONSUMER_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -46,37 +49,53 @@ impl MemoryManager {
         };
         Self {
             execution_pool: Arc::new(pool),
-            partition_memory_manager: Arc::new(Mutex::new(HashMap::new()))
+            partition_memory_manager: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn acquire_exec_memory(self: Arc<Self>, required: usize, consumer: &dyn MemoryConsumer) -> Result<usize> {
+    pub fn acquire_exec_memory(
+        self: Arc<Self>,
+        required: usize,
+        consumer: &dyn MemoryConsumer,
+    ) -> Result<usize> {
         let partition_id = consumer.partition_id();
         let partition_manager = {
             let mut all_managers = self.partition_memory_manager.lock();
-            all_managers.entry(partition_id)
-                .or_insert_with(|| PartitionMemoryManager::new(partition_id, self.clone()))
+            all_managers.entry(partition_id).or_insert_with(|| {
+                PartitionMemoryManager::new(partition_id, self.clone())
+            })
         };
         partition_manager.acquire_exec_memory(required, consumer)
     }
 
-    pub fn acquire_exec_pool_memory(&self, required: usize, consumer: &dyn MemoryConsumer) -> usize {
+    pub fn acquire_exec_pool_memory(
+        &self,
+        required: usize,
+        consumer: &dyn MemoryConsumer,
+    ) -> usize {
         self.execution_pool.acquire_memory(required, consumer)
     }
 
     pub fn release_exec_pool_memory(&self, release_size: usize, partition_id: usize) {
-        self.execution_pool.release_memory(release_size, partition_id)
+        self.execution_pool
+            .release_memory(release_size, partition_id)
     }
 
-    pub fn update_exec_pool_usage(&self, granted_size: usize, real_size: usize, consumer: &dyn MemoryConsumer) {
-        self.execution_pool.update_usage(granted_size, real_size, consumer)
+    pub fn update_exec_pool_usage(
+        &self,
+        granted_size: usize,
+        real_size: usize,
+        consumer: &dyn MemoryConsumer,
+    ) {
+        self.execution_pool
+            .update_usage(granted_size, real_size, consumer)
     }
 
     pub fn release_all_exec_pool_for_partition(&self, partition_id: usize) -> usize {
         self.execution_pool.release_all(partition_id)
     }
 
-    pub fn exec_memory_used(&self) -> usize{
+    pub fn exec_memory_used(&self) -> usize {
         self.execution_pool.memory_used()
     }
 
@@ -104,9 +123,15 @@ impl PartitionMemoryManager {
         }
     }
 
-    pub fn acquire_exec_memory(&mut self, required: usize, consumer: &dyn MemoryConsumer) -> Result<usize> {
+    pub fn acquire_exec_memory(
+        &mut self,
+        required: usize,
+        consumer: &dyn MemoryConsumer,
+    ) -> Result<usize> {
         let mut consumers = self.consumers.lock();
-        let mut got = self.memory_manager.acquire_exec_pool_memory(required, consumer);
+        let mut got = self
+            .memory_manager
+            .acquire_exec_pool_memory(required, consumer);
         if got < required {
             // spill others first
         }
@@ -116,7 +141,10 @@ impl PartitionMemoryManager {
         }
 
         if got < required {
-            return Err(OutOfMemory(format!("Unable to acquire {} bytes of memory, got {}", required, got)))
+            return Err(OutOfMemory(format!(
+                "Unable to acquire {} bytes of memory, got {}",
+                required, got
+            )));
         }
 
         consumers.insert(consumer);
@@ -132,17 +160,26 @@ impl PartitionMemoryManager {
             let cur_used = c.get_used();
             used += cur_used;
             if cur_used > 0 {
-                info!("Consumer {} acquired {}", c.str_repr(), human_readable_size(cur_used))
+                info!(
+                    "Consumer {} acquired {}",
+                    c.str_repr(),
+                    human_readable_size(cur_used)
+                )
             }
         }
-        let no_consumer_size =
-            self.memory_manager.exec_memory_used_for_partition(self.partition_id) - used;
-        info!("{} bytes of memory were used for partition {} without specific consumer",
-            human_readable_size(no_consumer_size), self.partition_id)
+        let no_consumer_size = self
+            .memory_manager
+            .exec_memory_used_for_partition(self.partition_id)
+            - used;
+        info!(
+            "{} bytes of memory were used for partition {} without specific consumer",
+            human_readable_size(no_consumer_size),
+            self.partition_id
+        )
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MemoryConsumerId {
     partition_id: usize,
     id: usize,
@@ -168,23 +205,23 @@ pub trait MemoryConsumer {
     /// Unique id of the consumer
     fn id(&self) -> &MemoryConsumerId;
 
-    fn manager(&self) -> Arc<MemoryManager>;
+    fn memory_manager(&self) -> Arc<MemoryManager>;
     /// partition that the consumer belongs to
     fn partition_id(&self) -> uszie {
         self.id().partition_id
     }
     /// Try allocate `required` bytes as needed
     fn allocate(&self, required: usize) -> Result<()> {
-        let got = self.manager().acquire_exec_memory(required, self)?;
-        self.update_used(got as i64);
+        let got = self.memory_manager().acquire_exec_memory(required, self)?;
+        self.update_used(got as isize);
         Ok(())
     }
     /// Spill at least `size` bytes to disk and frees memory
-    async fn spill(&self, size: usize, trigger: &dyn MemoryConsumer) -> usize;
+    async fn spill(&self, size: usize, trigger: &dyn MemoryConsumer) -> Result<usize>;
     /// Get current memory usage for the consumer itself
-    fn get_used(&self) -> usize;
+    fn get_used(&self) -> isize;
 
-    fn update_used(&self, delta: i64);
+    fn update_used(&self, delta: isize);
     /// Get total number of spilled bytes so far
     fn spilled_bytes(&self) -> usize;
     /// Get total number of triggered spills so far

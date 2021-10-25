@@ -39,6 +39,9 @@ use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 
 use crate::error::{DataFusionError, Result};
+use crate::physical_plan::metrics::{
+    BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet,
+};
 use crate::physical_plan::{
     common::spawn_execution, expressions::PhysicalSortExpr, DisplayFormatType,
     Distribution, ExecutionPlan, Partitioning, PhysicalExpr, RecordBatchStream,
@@ -334,7 +337,7 @@ struct RowIndex {
 }
 
 #[derive(Debug)]
-struct SortPreservingMergeStream {
+pub(crate) struct SortPreservingMergeStream {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
     /// The sorted input streams to merge together
@@ -362,7 +365,7 @@ struct SortPreservingMergeStream {
 }
 
 impl SortPreservingMergeStream {
-    fn new(
+    pub(crate) fn new(
         streams: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
         schema: SchemaRef,
         expressions: &[PhysicalSortExpr],
@@ -663,6 +666,7 @@ mod tests {
     use crate::test;
 
     use super::*;
+    use crate::physical_plan::sorts::sort::SortExec;
     use futures::SinkExt;
     use tokio_stream::StreamExt;
 

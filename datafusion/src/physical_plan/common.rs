@@ -25,11 +25,13 @@ use arrow::compute::concat;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::error::Result as ArrowResult;
+use arrow::io::ipc::write::FileWriter;
 use arrow::record_batch::RecordBatch;
 use futures::channel::mpsc;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use std::fs;
-use std::fs::metadata;
+use std::fs::{metadata, File};
+use std::io::BufWriter;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::task::JoinHandle;
@@ -225,6 +227,59 @@ pub fn compute_record_batch_statistics(
         column_statistics: Some(column_statistics),
         is_exact: true,
     }
+}
+
+pub struct IPCWriterWrapper {
+    pub path: String,
+    pub writer: FileWriter<BufWriter<File>>,
+    pub num_batches: u64,
+    pub num_rows: u64,
+    pub num_bytes: u64,
+}
+
+impl IPCWriterWrapper {
+    pub fn new(path: &str, schema: &Schema) -> Result<Self> {
+        let file = File::create(path)
+            .map_err(|e| {
+                BallistaError::General(format!(
+                    "Failed to create partition file at {}: {:?}",
+                    path, e
+                ))
+            })
+            .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+        let buffer_writer = std::io::BufWriter::new(file);
+        Ok(Self {
+            num_batches: 0,
+            num_rows: 0,
+            num_bytes: 0,
+            path: path.to_owned(),
+            writer: FileWriter::try_new(buffer_writer, schema)?,
+        })
+    }
+
+    pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.writer.write(batch)?;
+        self.num_batches += 1;
+        self.num_rows += batch.num_rows() as u64;
+        let num_bytes: usize = batch_memory_size(batch);
+        self.num_bytes += num_bytes as u64;
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<()> {
+        self.writer.finish().map_err(DataFusionError::ArrowError)
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+pub fn batch_memory_size(rb: &RecordBatch) -> usize {
+    rb.columns()
+        .iter()
+        .map(|c| estimated_bytes_size(c.as_ref()))
+        .sum()
 }
 
 #[cfg(test)]
