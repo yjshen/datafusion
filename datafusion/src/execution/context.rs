@@ -21,8 +21,6 @@ use crate::{
         catalog::{CatalogList, MemoryCatalogList},
         information_schema::CatalogWithInformationSchema,
     },
-    execution::disk_manager::DiskManager,
-    execution::memory_management::MemoryManager,
     logical_plan::{PlanType, ToStringifiedPlan},
     optimizer::eliminate_limit::EliminateLimit,
     physical_optimizer::{
@@ -162,8 +160,6 @@ impl ExecutionContext {
                 .register_catalog(config.default_catalog.clone(), default_catalog);
         }
 
-        let max_memory_allowed = config.max_memory;
-
         Self {
             state: Arc::new(Mutex::new(ExecutionContextState {
                 catalog_list,
@@ -173,8 +169,6 @@ impl ExecutionContext {
                 config,
                 execution_props: ExecutionProps::new(),
                 object_store_registry: Arc::new(ObjectStoreRegistry::new()),
-                memory_manager: Arc::new(MemoryManager::new(max_memory_allowed)),
-                disk_manager: Arc::new(()),
             })),
         }
     }
@@ -803,7 +797,6 @@ impl Default for ExecutionConfig {
             repartition_aggregations: true,
             repartition_windows: true,
             parquet_pruning: true,
-            max_memory: usize::MAX,
         }
     }
 }
