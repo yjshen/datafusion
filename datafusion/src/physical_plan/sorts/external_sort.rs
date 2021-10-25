@@ -37,6 +37,7 @@ use crate::physical_plan::metrics::{
 };
 use crate::physical_plan::sort::sort_batch;
 use crate::physical_plan::sort_preserving_merge::SortPreservingMergeStream;
+use crate::physical_plan::sorts::in_mem_sort::InMemSortStream;
 use crate::physical_plan::sorts::sort::sort_batch;
 use crate::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeStream;
 use crate::physical_plan::{
@@ -44,7 +45,6 @@ use crate::physical_plan::{
     RecordBatchStream, SendableRecordBatchStream, Statistics,
 };
 use arrow::compute::aggregate::estimated_bytes_size;
-pub use arrow::compute::sort::SortOptions;
 use arrow::compute::{sort::lexsort_to_indices, take};
 use arrow::datatypes::SchemaRef;
 use arrow::error::Result as ArrowResult;
@@ -146,7 +146,7 @@ impl MemoryConsumer for ExternalSorter {
 
         let total_size = in_mem_batches.iter().map(|b| batch_memory_size(b)).sum();
         let path = self.disk_manager.create_tmp_file()?;
-        let stream = merge_sort(
+        let stream = in_mem_merge_sort(
             *in_mem_batches,
             self.schema.clone(),
             &*self.expr,
@@ -183,7 +183,7 @@ impl MemoryConsumer for ExternalSorter {
     }
 }
 
-async fn merge_sort(
+async fn in_mem_merge_sort(
     sorted_bathes: Vec<RecordBatch>,
     schema: SchemaRef,
     expressions: &[PhysicalSortExpr],
@@ -196,16 +196,8 @@ async fn merge_sort(
             vec![Arc::new(sorted_bathes(0))],
         )))
     } else {
-        let streams = sorted_bathes
-            .into_iter()
-            .map(|batch| {
-                let (mut tx, rx) = futures::channel::mpsc::channel(1);
-                tx.send(ArrowResult::Ok(batch)).await;
-                rx
-            })
-            .collect::<Vec<_>>();
-        Ok(Box::pin(SortPreservingMergeStream::new(
-            streams,
+        Ok(Box::pin(InMemSortStream::new(
+            sorted_bathes,
             schema,
             expressions,
             target_batch_size,
