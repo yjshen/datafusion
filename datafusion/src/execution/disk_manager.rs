@@ -15,29 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::fs::File;
-use std::fs;
-use std::path::{Path, PathBuf};
 use crate::error::{DataFusionError, Result};
-use uuid::Uuid;
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 pub struct DiskManager {
     local_dirs: Vec<String>,
 }
 
-struct PathFile(String, File);
-
 impl DiskManager {
-
     pub fn new(conf_dirs: &Vec<String>) -> Result<Self> {
         Ok(Self {
             local_dirs: create_local_dirs(conf_dirs)?,
         })
     }
 
-    fn create_tmp_file(&self) -> Result<PathFile> {
+    pub fn create_tmp_file(&self) -> Result<String> {
         create_tmp_file(&self.local_dirs)
     }
 
@@ -49,10 +46,12 @@ impl DiskManager {
     }
 }
 
-
 /// Setup local dirs by creating one new dir in each of the given dirs
 fn create_local_dirs(local_dir: &Vec<String>) -> Result<Vec<String>> {
-    local_dir.into_iter().map(|root| create_directory(root, "datafusion")).collect()
+    local_dir
+        .into_iter()
+        .map(|root| create_directory(root, "datafusion"))
+        .collect()
 }
 
 const MAX_DIR_CREATION_ATTEMPTS: i32 = 10;
@@ -69,9 +68,10 @@ fn create_directory(root: &str, prefix: &str) -> Result<String> {
         }
         attempt += 1;
     }
-    Err(DataFusionError::Execution(
-        format!("Failed to create a temp dir under {} after {} attempts",
-                root, MAX_DIR_CREATION_ATTEMPTS)))
+    Err(DataFusionError::Execution(format!(
+        "Failed to create a temp dir under {} after {} attempts",
+        root, MAX_DIR_CREATION_ATTEMPTS
+    )))
 }
 
 fn get_file(file_name: &str, local_dirs: &Vec<String>) -> String {
@@ -85,11 +85,12 @@ fn get_file(file_name: &str, local_dirs: &Vec<String>) -> String {
     path.to_str().unwrap().to_string()
 }
 
-fn create_tmp_file(local_dirs: &Vec<String>) -> Result<PathFile> {
+fn create_tmp_file(local_dirs: &Vec<String>) -> Result<String> {
     let name = Uuid::new_v4().to_string();
     let mut path = get_file(&*name, local_dirs);
     while path.exists() {
         path = get_file(&*Uuid::new_v4().to_string(), local_dirs);
     }
-    File::create(&path).map_err(|e| e.into()).map(|f| PathFile(path, f))
+    File::create(&path).map_err(|e| e.into())?;
+    Ok(path)
 }

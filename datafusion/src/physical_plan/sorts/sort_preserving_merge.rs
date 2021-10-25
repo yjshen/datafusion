@@ -40,11 +40,15 @@ use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
 
 use crate::error::{DataFusionError, Result};
+use crate::physical_plan::metrics::{
+    BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet,
+};
 use crate::physical_plan::{
     common::spawn_execution, expressions::PhysicalSortExpr, DisplayFormatType,
     Distribution, ExecutionPlan, Partitioning, PhysicalExpr, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
+use crate::physical_plan::common::AbortOnDropMany;
 
 /// Sort preserving merge execution plan
 ///
@@ -337,7 +341,7 @@ struct RowIndex {
 }
 
 #[derive(Debug)]
-struct SortPreservingMergeStream {
+pub(crate) struct SortPreservingMergeStream {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
 
@@ -376,8 +380,8 @@ struct SortPreservingMergeStream {
 }
 
 impl SortPreservingMergeStream {
-    fn new(
-        receivers: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
+    pub(crate) fn new(
+        streams: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
         _drop_helper: AbortOnDropMany<()>,
         schema: SchemaRef,
         expressions: &[PhysicalSortExpr],
@@ -682,7 +686,7 @@ mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field, Schema};
     use futures::{FutureExt, SinkExt};
-    use tokio_stream::StreamExt;
+    use crate::physical_plan::sorts::sort::SortExec;
 
     #[tokio::test]
     async fn test_merge_interleave() {

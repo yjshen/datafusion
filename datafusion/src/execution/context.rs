@@ -190,7 +190,7 @@ impl ExecutionContext {
                 execution_props: ExecutionProps::new(),
                 object_store_registry: Arc::new(ObjectStoreRegistry::new()),
                 memory_manager: Arc::new(MemoryManager::new(max_memory_allowed)),
-                disk_manager: Arc::new(())
+                disk_manager: Arc::new(()),
             })),
         }
     }

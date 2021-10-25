@@ -624,8 +624,11 @@ pub mod distinct_expressions;
 pub mod empty;
 pub mod explain;
 pub mod expressions;
+<<<<<<< HEAD
 pub mod file_format;
 pub mod external_sort;
+=======
+>>>>>>> move sorts together into submodule
 pub mod filter;
 pub mod functions;
 pub mod hash_aggregate;
@@ -642,8 +645,7 @@ pub mod projection;
 #[cfg(feature = "regex_expressions")]
 pub mod regex_expressions;
 pub mod repartition;
-pub mod sort;
-pub mod sort_preserving_merge;
+pub mod sorts;
 pub mod stream;
 pub mod string_expressions;
 pub mod type_coercion;
