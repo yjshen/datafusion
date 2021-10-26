@@ -15,18 +15,23 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::execution::memory_management::{MemoryConsumer, MemoryConsumerId};
-use crate::physical_plan::aggregates::return_type;
+use crate::execution::memory_management::MemoryConsumer;
 use hashbrown::HashMap;
 use log::{info, warn};
-use std::cmp::{max, min};
+use std::cmp::min;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Condvar, Mutex};
 
-pub(crate) trait ExecutionMemoryPool {
+pub(crate) trait ExecutionMemoryPool: Sync + Send + Debug {
     fn memory_available(&self) -> usize;
     fn memory_used(&self) -> usize;
     fn memory_used_partition(&self, partition_id: usize) -> usize;
-    fn acquire_memory(&self, required: usize, consumer: &dyn MemoryConsumer) -> usize;
+    fn acquire_memory(
+        &self,
+        required: usize,
+        consumer: &Arc<dyn MemoryConsumer>,
+    ) -> usize;
     fn update_usage(
         &self,
         granted_size: usize,
@@ -49,6 +54,14 @@ impl DummyExecutionMemoryPool {
     }
 }
 
+impl Debug for DummyExecutionMemoryPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummyExecutionMemoryPool")
+            .field("total", &self.pool_size)
+            .finish()
+    }
+}
+
 impl ExecutionMemoryPool for DummyExecutionMemoryPool {
     fn memory_available(&self) -> usize {
         usize::MAX
@@ -62,7 +75,11 @@ impl ExecutionMemoryPool for DummyExecutionMemoryPool {
         0
     }
 
-    fn acquire_memory(&self, required: usize, _consumer: &dyn MemoryConsumer) -> usize {
+    fn acquire_memory(
+        &self,
+        required: usize,
+        _consumer: &Arc<dyn MemoryConsumer>,
+    ) -> usize {
         required
     }
 
@@ -98,6 +115,15 @@ impl ConstraintExecutionMemoryPool {
     }
 }
 
+impl Debug for ConstraintExecutionMemoryPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConstraintExecutionMemoryPool")
+            .field("total", &self.pool_size)
+            .field("used", &self.memory_used())
+            .finish()
+    }
+}
+
 impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
     fn memory_available(&self) -> usize {
         self.pool_size - self.memory_used()
@@ -110,10 +136,17 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
 
     fn memory_used_partition(&self, partition_id: usize) -> usize {
         let partition_usage = self.memory_usage.lock().unwrap();
-        partition_usage[partition_id].unwrap_or(0)
+        match partition_usage.get(&partition_id) {
+            None => 0,
+            Some(v) => *v,
+        }
     }
 
-    fn acquire_memory(&self, required: usize, consumer: &dyn MemoryConsumer) -> usize {
+    fn acquire_memory(
+        &self,
+        required: usize,
+        consumer: &Arc<dyn MemoryConsumer>,
+    ) -> usize {
         assert!(required > 0);
         let partition_id = consumer.partition_id();
         let mut partition_usage = self.memory_usage.lock().unwrap();
@@ -138,7 +171,7 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
                 Some(max_available) => min(required, max_available),
             };
 
-            let total_used = partition_usage.values().sum();
+            let total_used: usize = partition_usage.values().sum();
             let total_available = self.pool_size - total_used;
             // Only give it as much memory as is free, which might be none if it reached 1 / num_active_partition
             let to_grant = min(max_grant, total_available);
@@ -147,8 +180,11 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
             // if we can't give it this much now, wait for other tasks to free up memory
             // (this happens if older tasks allocated lots of memory before N grew)
             if to_grant < required && current_mem + to_grant < min_memory_per_partition {
-                info!("{} waiting for at least 1/2N of pool to be free", consumer);
-                self.condvar.wait(&mut partition_usage);
+                info!(
+                    "{:?} waiting for at least 1/2N of pool to be free",
+                    consumer
+                );
+                self.condvar.wait(partition_usage);
             } else {
                 *partition_usage.entry(partition_id).or_insert(0) += to_grant;
                 return to_grant;
@@ -169,12 +205,12 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         } else {
             let mut partition_usage = self.memory_usage.lock().unwrap();
             if granted_size > real_size {
-                partition_usage.entry(consumer.partition_id()) -=
+                *partition_usage.entry(consumer.partition_id()).or_insert(0) -=
                     granted_size - real_size;
             } else {
                 // TODO: this would have caused OOM already if size estimation ahead is much smaller than
                 // that of actual allocation
-                partition_usage.entry(consumer.partition_id()) +=
+                *partition_usage.entry(consumer.partition_id()).or_insert(0) +=
                     real_size - granted_size;
             }
         }
@@ -182,7 +218,11 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
 
     fn release_memory(&self, release_size: usize, partition_id: usize) {
         let mut partition_usage = self.memory_usage.lock().unwrap();
-        let current_mem = partition_usage[partition_id].unwrap_or(0);
+        let current_mem = match partition_usage.get(&partition_id) {
+            None => 0,
+            Some(v) => *v,
+        };
+
         let to_free = if current_mem < release_size {
             warn!(
                 "Release called to free {} but partition only holds {} from the pool",
@@ -193,8 +233,9 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
             release_size
         };
         if partition_usage.contains_key(&partition_id) {
-            partition_usage.entry(partition_id) -= to_free;
-            if partition_usage[partition_id].unwrap() == 0 {
+            let entry = partition_usage.entry(partition_id).or_insert(0);
+            *entry -= to_free;
+            if *entry == 0 {
                 partition_usage.remove(&partition_id);
             }
         }
@@ -203,10 +244,12 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
 
     fn release_all(&self, partition_id: usize) -> usize {
         let mut partition_usage = self.memory_usage.lock().unwrap();
-        let current_mem = partition_usage[partition_id].unwrap_or(0);
-        if current_mem == 0 {
-            return 0;
+        let mut current_mem = 0;
+        match partition_usage.get(&partition_id) {
+            None => return 0,
+            Some(v) => current_mem = *v,
         }
+
         partition_usage.remove(&partition_id);
         self.condvar.notify_all();
         return current_mem;

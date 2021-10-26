@@ -15,10 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::error::{DataFusionError, Result};
+use crate::error::Result;
 use crate::execution::disk_manager::DiskManager;
 use crate::execution::memory_management::MemoryManager;
 use std::sync::Arc;
+
+// Employ lazy static temporarily for RuntimeEnv, to avoid plumbing it through
+// all `async fn execute(&self, partition: usize, runtime: Arc<RuntimeEnv>)`
+lazy_static! {
+    pub static ref RUNTIME_ENV: Arc<RuntimeEnv> = {
+        let config = RuntimeConfig::new();
+        Arc::new(RuntimeEnv::new(config).unwrap())
+    };
+}
 
 #[derive(Clone)]
 pub struct RuntimeEnv {
@@ -30,8 +39,7 @@ pub struct RuntimeEnv {
 }
 
 impl RuntimeEnv {
-    pub fn new(config: Result<RuntimeConfig>) -> Result<Self> {
-        let config = config?;
+    pub fn new(config: RuntimeConfig) -> Result<Self> {
         let memory_manager = Arc::new(MemoryManager::new(config.max_memory));
         let disk_manager = Arc::new(DiskManager::new(&config.local_dirs)?);
         Ok(Self {
@@ -69,7 +77,7 @@ impl RuntimeConfig {
     }
 
     /// Customize exec size
-    pub fn with_max_execution_memory(mut self, max_memory: uszie) -> Self {
+    pub fn with_max_execution_memory(mut self, max_memory: usize) -> Self {
         assert!(max_memory > 0);
         self.max_memory = max_memory;
         self
@@ -84,19 +92,15 @@ impl RuntimeConfig {
 }
 
 impl Default for RuntimeConfig {
-    fn default() -> Result<Self> {
-        let tmp_dir = tempfile::tempdir().map_err(|e| e.into())?;
-        let path = tmp_dir
-            .path()
-            .to_str()
-            .ok_or_else(|e| e.into())?
-            .to_string();
+    fn default() -> Self {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().to_str().unwrap().to_string();
         std::mem::forget(tmp_dir);
 
-        Ok(Self {
+        Self {
             batch_size: 8192,
             max_memory: usize::MAX,
             local_dirs: vec![path],
-        })
+        }
     }
 }

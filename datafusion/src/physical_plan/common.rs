@@ -287,14 +287,7 @@ pub struct IPCWriterWrapper {
 
 impl IPCWriterWrapper {
     pub fn new(path: &str, schema: &Schema) -> Result<Self> {
-        let file = File::create(path)
-            .map_err(|e| {
-                BallistaError::General(format!(
-                    "Failed to create partition file at {}: {:?}",
-                    path, e
-                ))
-            })
-            .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+        let file = File::create(path).map_err(|e| DataFusionError::IoError(e))?;
         let buffer_writer = std::io::BufWriter::new(file);
         Ok(Self {
             num_batches: 0,

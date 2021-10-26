@@ -23,11 +23,10 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use arrow::array::ord::DynComparator;
-use arrow::array::{growable::make_growable, ord::build_compare, ArrayRef};
+use arrow::array::growable::make_growable;
 use arrow::compute::sort::SortOptions;
 use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
@@ -37,13 +36,15 @@ use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::stream::FusedStream;
 use futures::{Stream, StreamExt};
-use hashbrown::HashMap;
 
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet,
 };
-use crate::physical_plan::sorts::{RowIndex, SortKeyCursor, StreamWrapper};
+use crate::physical_plan::sorts::external_sort::convert_stream_disk_based;
+use crate::physical_plan::sorts::{
+    RowIndex, SortKeyCursor, SpillableStream, StreamWrapper,
+};
 use crate::physical_plan::{
     common::spawn_execution, expressions::PhysicalSortExpr, DisplayFormatType,
     Distribution, ExecutionPlan, Partitioning, PhysicalExpr, RecordBatchStream,
@@ -205,7 +206,7 @@ pub(crate) struct SortPreservingMergeStream {
     schema: SchemaRef,
 
     /// The sorted input streams to merge together
-    streams: Vec<StreamWrapper>,
+    streams: Mutex<Vec<StreamWrapper>>,
 
     /// Drop helper for tasks feeding the [`receivers`](Self::receivers)
     _drop_helper: AbortOnDropMany<()>,
@@ -239,6 +240,42 @@ pub(crate) struct SortPreservingMergeStream {
 }
 
 impl SortPreservingMergeStream {
+    pub(crate) async fn spill_underlying_stream(
+        &mut self,
+        stream_idx: usize,
+        path: String,
+    ) -> Result<usize> {
+        let streams = self.streams.lock().unwrap();
+        let origin_stream = &streams[stream_idx];
+        match origin_stream {
+            StreamWrapper::Receiver(_) => {
+                return Err(DataFusionError::Execution(
+                    "Unexpected spilling a receiver stream in SortPreservingMerge"
+                        .to_string(),
+                ))
+            }
+            StreamWrapper::Stream(stream) => match stream {
+                None => Ok(0),
+                Some(ref mut stream) => {
+                    return if stream.spillable {
+                        let (disk_stream, spill_size) = convert_stream_disk_based(
+                            &mut stream.stream,
+                            path,
+                            self.schema.clone(),
+                        )
+                        .await?;
+                        streams[stream_idx] = StreamWrapper::Stream(Some(
+                            SpillableStream::new_unspillable(disk_stream),
+                        ));
+                        Ok(spill_size)
+                    } else {
+                        Ok(0)
+                    }
+                }
+            },
+        }
+    }
+
     pub(crate) fn new_from_receiver(
         receivers: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
         _drop_helper: AbortOnDropMany<()>,
@@ -252,10 +289,11 @@ impl SortPreservingMergeStream {
             .map(|_| VecDeque::new())
             .collect();
 
-        let streams = receivers
+        let receivers = receivers
             .into_iter()
             .map(|s| StreamWrapper::Receiver(s))
             .collect();
+        let streams = Mutex::new(receivers);
 
         Self {
             schema,
@@ -273,7 +311,7 @@ impl SortPreservingMergeStream {
     }
 
     pub(crate) fn new_from_stream(
-        streams: Vec<SendableRecordBatchStream>,
+        streams: Vec<SpillableStream>,
         schema: SchemaRef,
         expressions: &[PhysicalSortExpr],
         target_batch_size: usize,
@@ -288,6 +326,7 @@ impl SortPreservingMergeStream {
             .into_iter()
             .map(|s| StreamWrapper::Stream(Some(s)))
             .collect::<Vec<_>>();
+        let streams = Mutex::new(streams);
 
         Self {
             schema,
@@ -319,7 +358,8 @@ impl SortPreservingMergeStream {
             }
         }
 
-        let stream = &mut self.receivers[idx];
+        let streams = self.streams.lock().unwrap();
+        let stream = &mut streams[idx];
         if stream.is_terminated() {
             return Poll::Ready(Ok(()));
         }

@@ -78,7 +78,7 @@ fn get_file(file_name: &str, local_dirs: &Vec<String>) -> String {
     let mut hasher = DefaultHasher::new();
     file_name.hash(&mut hasher);
     let hash = hasher.finish();
-    let dir = local_dirs[hash.rem_euclid(local_dirs.len() as u64)];
+    let dir = &local_dirs[hash.rem_euclid(local_dirs.len() as u64) as usize];
     let mut path = PathBuf::new();
     path.push(dir);
     path.push(file_name);
@@ -88,9 +88,9 @@ fn get_file(file_name: &str, local_dirs: &Vec<String>) -> String {
 fn create_tmp_file(local_dirs: &Vec<String>) -> Result<String> {
     let name = Uuid::new_v4().to_string();
     let mut path = get_file(&*name, local_dirs);
-    while path.exists() {
+    while Path::new(path.as_str()).exists() {
         path = get_file(&*Uuid::new_v4().to_string(), local_dirs);
     }
-    File::create(&path).map_err(|e| e.into())?;
+    File::create(&path)?;
     Ok(path)
 }

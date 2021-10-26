@@ -21,15 +21,14 @@ use super::common::AbortOnDropSingle;
 use super::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
-use super::{RecordBatchStream, SendableRecordBatchStream, Statistics};
+use super::{RecordBatchStream, SendableRecordBatchStream};
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::expressions::PhysicalSortExpr;
 use crate::physical_plan::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
 use crate::physical_plan::{
-    common, DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
-    RecordBatchStream, SendableRecordBatchStream, Statistics,
+    common, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, Statistics,
 };
 pub use arrow::compute::sort::SortOptions;
 use arrow::compute::{sort::lexsort_to_indices, take};
@@ -45,6 +44,7 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use crate::physical_plan::common::AbortOnDropSingle;
 
 /// Sort execution plan
 #[derive(Debug)]

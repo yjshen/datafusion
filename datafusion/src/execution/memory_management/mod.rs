@@ -18,16 +18,16 @@
 pub mod memory_pool;
 
 use crate::error::DataFusionError::OutOfMemory;
-use crate::error::{DataFusionError, Result};
-use crate::execution::disk_manager::DiskManager;
+use crate::error::Result;
 use crate::execution::memory_management::memory_pool::{
     ConstraintExecutionMemoryPool, DummyExecutionMemoryPool, ExecutionMemoryPool,
 };
 use async_trait::async_trait;
 use hashbrown::{HashMap, HashSet};
 use log::{debug, info};
+use std::borrow::BorrowMut;
 use std::fmt;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -41,13 +41,13 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     pub fn new(exec_pool_size: usize) -> Self {
-        let pool: dyn ExecutionMemoryPool = if exec_pool_size == usize::MAX {
-            DummyExecutionMemoryPool::new()
+        let execution_pool = if exec_pool_size == usize::MAX {
+            Arc::new(DummyExecutionMemoryPool::new() as dyn ExecutionMemoryPool)
         } else {
-            ConstraintExecutionMemoryPool::new(exec_pool_size)
+            Arc::new(ConstraintExecutionMemoryPool::new(exec_pool_size))
         };
         Self {
-            execution_pool: Arc::new(pool),
+            execution_pool,
             partition_memory_manager: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -55,7 +55,7 @@ impl MemoryManager {
     pub fn acquire_exec_memory(
         self: Arc<Self>,
         required: usize,
-        consumer: &dyn MemoryConsumer,
+        consumer: Arc<dyn MemoryConsumer>,
     ) -> Result<usize> {
         let partition_id = consumer.partition_id();
         let partition_manager = {
@@ -70,7 +70,7 @@ impl MemoryManager {
     pub fn acquire_exec_pool_memory(
         &self,
         required: usize,
-        consumer: &dyn MemoryConsumer,
+        consumer: &Arc<dyn MemoryConsumer>,
     ) -> usize {
         self.execution_pool.acquire_memory(required, consumer)
     }
@@ -110,7 +110,7 @@ fn next_id() -> usize {
 pub struct PartitionMemoryManager {
     memory_manager: Arc<MemoryManager>,
     partition_id: usize,
-    consumers: Arc<Mutex<HashSet<dyn MemoryConsumer>>>,
+    consumers: Arc<Mutex<HashSet<Arc<dyn MemoryConsumer>>>>,
 }
 
 impl PartitionMemoryManager {
@@ -125,12 +125,12 @@ impl PartitionMemoryManager {
     pub fn acquire_exec_memory(
         &mut self,
         required: usize,
-        consumer: &dyn MemoryConsumer,
+        consumer: Arc<dyn MemoryConsumer>,
     ) -> Result<usize> {
-        let mut consumers = self.consumers.lock().unwrap();
+        let mut consumers = self.consumers.lock().unwrap().borrow_mut();
         let mut got = self
             .memory_manager
-            .acquire_exec_pool_memory(required, consumer);
+            .acquire_exec_pool_memory(required, &consumer);
         if got < required {
             // spill others first
         }
@@ -162,14 +162,14 @@ impl PartitionMemoryManager {
                 info!(
                     "Consumer {} acquired {}",
                     c.str_repr(),
-                    human_readable_size(cur_used)
+                    human_readable_size(cur_used as usize)
                 )
             }
         }
         let no_consumer_size = self
             .memory_manager
             .exec_memory_used_for_partition(self.partition_id)
-            - used;
+            - (used as usize);
         info!(
             "{} bytes of memory were used for partition {} without specific consumer",
             human_readable_size(no_consumer_size),
@@ -178,10 +178,10 @@ impl PartitionMemoryManager {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct MemoryConsumerId {
-    partition_id: usize,
-    id: usize,
+    pub partition_id: usize,
+    pub id: usize,
 }
 
 impl MemoryConsumerId {
@@ -198,7 +198,7 @@ impl Display for MemoryConsumerId {
 }
 
 #[async_trait]
-pub trait MemoryConsumer {
+pub trait MemoryConsumer: Send + Sync + Debug {
     /// Display name of the consumer
     fn name(&self) -> String;
     /// Unique id of the consumer
@@ -206,12 +206,14 @@ pub trait MemoryConsumer {
 
     fn memory_manager(&self) -> Arc<MemoryManager>;
     /// partition that the consumer belongs to
-    fn partition_id(&self) -> uszie {
+    fn partition_id(&self) -> usize {
         self.id().partition_id
     }
     /// Try allocate `required` bytes as needed
-    fn allocate(&self, required: usize) -> Result<()> {
-        let got = self.memory_manager().acquire_exec_memory(required, self)?;
+    fn allocate(self: Arc<Self>, required: usize) -> Result<()> {
+        let got = self
+            .memory_manager()
+            .acquire_exec_memory(required, self.clone())?;
         self.update_used(got as isize);
         Ok(())
     }
@@ -250,15 +252,15 @@ fn human_readable_size(size: usize) -> String {
     let size = size as u64;
     let (value, unit) = {
         if size >= 2 * TB {
-            (size as f64 / TB, "TB")
+            (size as f64 / TB as f64, "TB")
         } else if size >= 2 * GB {
-            (size as f64 / GB, "GB")
+            (size as f64 / GB as f64, "GB")
         } else if size >= 2 * MB {
-            (size as f64 / MB, "MB")
+            (size as f64 / MB as f64, "MB")
         } else if size >= 2 * KB {
-            (size as f64 / KB, "KB")
+            (size as f64 / KB as f64, "KB")
         } else {
-            (size, "B")
+            (size as f64, "B")
         }
     };
     format!("{:.1} {}", value, unit)
