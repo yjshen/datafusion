@@ -20,7 +20,6 @@
 use super::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
-use super::{RecordBatchStream, SendableRecordBatchStream, Statistics};
 use crate::error::{DataFusionError, Result};
 use crate::execution::disk_manager::{DiskManager, PathFile};
 use crate::execution::memory_management::{
@@ -40,6 +39,7 @@ use crate::physical_plan::sort_preserving_merge::SortPreservingMergeStream;
 use crate::physical_plan::sorts::in_mem_sort::InMemSortStream;
 use crate::physical_plan::sorts::sort::sort_batch;
 use crate::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeStream;
+use crate::physical_plan::stream::RecordBatchReceiverStream;
 use crate::physical_plan::{
     common, DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
     RecordBatchStream, SendableRecordBatchStream, Statistics,
@@ -48,21 +48,27 @@ use arrow::compute::aggregate::estimated_bytes_size;
 use arrow::compute::{sort::lexsort_to_indices, take};
 use arrow::datatypes::SchemaRef;
 use arrow::error::Result as ArrowResult;
+use arrow::io::ipc::read::{read_file_metadata, FileReader};
 use arrow::record_batch::RecordBatch;
 use arrow::{array::ArrayRef, error::ArrowError};
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use futures::{Future, SinkExt, Stream, StreamExt};
-use log::{debug, info};
-use parking_lot::Mutex;
+use log::{debug, error, info};
 use pin_project_lite::pin_project;
 use std::any::Any;
+use std::fs::File;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver as TKReceiver, Sender as TKSender};
 use tokio::task;
+
+enum ExternalSortingState {
+    Insert,
+    OutputWithMem,
+    OutputAllDisk,
+}
 
 struct ExternalSorter {
     id: MemoryConsumerId,
@@ -74,6 +80,7 @@ struct ExternalSorter {
     spilled_count: AtomicUsize,
     /// Sort expressions
     expr: Vec<PhysicalSortExpr>,
+    exec_state: ExternalSortingState,
     runtime: RuntimeEnv,
 }
 
@@ -93,46 +100,26 @@ impl ExternalSorter {
             spilled_bytes: AtomicUsize::new(0),
             spilled_count: AtomicUsize::new(0),
             expr,
+            exec_state: ExternalSortingState::Insert,
             runtime,
         }
     }
 
-    fn insert_batch(
-        &mut self,
-        input: RecordBatch,
-        schema: SchemaRef,
-        expr: &[PhysicalSortExpr],
-    ) -> Result<()> {
-        let size = batch_memory_size(&input);
-        self.allocate(size)?;
-        // sort each batch as it's inserted, more probably to be cache-resident
-        let sorted_batch = sort_batch(input, schema, expr)?;
-        let mut in_mem_batches = self.in_mem_batches.lock();
-        in_mem_batches.push(sorted_batch);
+    fn output_with_mem(&mut self) {
+        assert_eq!(self.exec_state, ExternalSortingState::Insert);
+        self.exec_state = ExternalSortingState::OutputWithMem
     }
 
-    fn sort(&self) {}
-}
-
-impl MemoryConsumer for ExternalSorter {
-    fn name(&self) -> String {
-        "ExternalSorter".to_owned()
+    fn spill_during_output(&mut self) {
+        assert_eq!(self.exec_state, ExternalSortingState::OutputWithMem);
+        self.exec_state = ExternalSortingState::OutputAllDisk
     }
 
-    fn id(&self) -> &MemoryConsumerId {
-        &self.id
-    }
-
-    fn memory_manager(&self) -> Arc<MemoryManager> {
-        self.runtime.memory_manager.clone()
-    }
-
-    async fn spill(&self, _size: usize, _trigger: &dyn MemoryConsumer) -> Result<usize> {
-        let in_mem_batches = self.in_mem_batches.lock();
-
+    async fn spill_while_inserting(&self) -> usize {
+        let mut in_mem_batches = self.in_mem_batches.lock().unwrap();
         // we could always get a chance to free some memory as long as we are holding some
         if in_mem_batches.len() == 0 {
-            return Ok(0);
+            return 0;
         }
 
         info!(
@@ -156,13 +143,50 @@ impl MemoryConsumer for ExternalSorter {
         .await;
 
         spill(stream, path, self.schema.clone())?;
+        *in_mem_batches = vec![];
 
         {
-            let mut spills = self.spills.lock();
+            let mut spills = self.spills.lock().unwrap();
             self.spilled_count.fetch_add(1, Ordering::SeqCst);
             self.spilled_bytes.fetch_add(total_size, Ordering::SeqCst);
             spills.push(path);
         }
+        total_size
+    }
+
+    fn insert_batch(
+        &mut self,
+        input: RecordBatch,
+        schema: SchemaRef,
+        expr: &[PhysicalSortExpr],
+    ) -> Result<()> {
+        let size = batch_memory_size(&input);
+        self.allocate(size)?;
+        // sort each batch as it's inserted, more probably to be cache-resident
+        let sorted_batch = sort_batch(input, schema, expr)?;
+        let mut in_mem_batches = self.in_mem_batches.lock().unwrap();
+        in_mem_batches.push(sorted_batch);
+    }
+
+    fn sort(&self) {}
+}
+
+impl MemoryConsumer for ExternalSorter {
+    fn name(&self) -> String {
+        "ExternalSorter".to_owned()
+    }
+
+    fn id(&self) -> &MemoryConsumerId {
+        &self.id
+    }
+
+    fn memory_manager(&self) -> Arc<MemoryManager> {
+        self.runtime.memory_manager.clone()
+    }
+
+    async fn spill(&self, _size: usize, _trigger: &dyn MemoryConsumer) -> Result<usize> {
+        let total_size = self.spill_while_inserting().await;
+
         Ok(total_size)
     }
 
@@ -211,17 +235,39 @@ async fn spill(
     path: String,
     schema: SchemaRef,
 ) -> Result<()> {
-    let (mut sender, receiver): (Sender<RecordBatch>, Receiver<RecordBatch>) =
+    let (mut sender, receiver): (TKSender<RecordBatch>, TKReceiver<RecordBatch>) =
         tokio::sync::mpsc::channel(2);
     while let Some(item) = sorted_stream.next().await {
         sender.send(item).await.ok();
     }
-    task::spawn_blocking(move || write_sorted(receiver, path, schema));
+    let path_clone = path.clone();
+    task::spawn_blocking(move || {
+        if let Err(e) = write_sorted(receiver, path_clone, schema) {
+            error!("Failure while spilling to path {}. Error: {}", path, e);
+        }
+    });
     Ok(())
 }
 
+async fn read_spill_as_stream(
+    path: String,
+    schema: SchemaRef,
+) -> Result<SendableRecordBatchStream> {
+    let (mut sender, receiver): (
+        TKSender<ArrowResult<RecordBatch>>,
+        TKReceiver<ArrowResult<RecordBatch>>,
+    ) = tokio::sync::mpsc::channel(2);
+    let path_clone = path.clone();
+    task::spawn_blocking(move || {
+        if let Err(e) = read_spill(sender, path_clone) {
+            error!("Failure while reading spill file: {}. Error: {}", path, e);
+        }
+    });
+    Ok(RecordBatchReceiverStream::create(&schema, receiver))
+}
+
 fn write_sorted(
-    mut receiver: Receiver<RecordBatch>,
+    mut receiver: TKReceiver<RecordBatch>,
     path: String,
     schema: SchemaRef,
 ) -> Result<()> {
@@ -237,25 +283,17 @@ fn write_sorted(
     Ok(())
 }
 
-struct SpillableSortedStream {
-    id: MemoryConsumerId,
-    schema: SchemaRef,
-    in_mem_batches: Mutex<Vec<RecordBatch>>,
-    /// Sort expressions
-    expr: Vec<PhysicalSortExpr>,
-    runtime: RuntimeEnv,
-}
-
-impl SpillableSortedStream {
-    fn new() -> Self {
-        Self {}
+fn read_spill(
+    mut sender: TKSender<ArrowResult<RecordBatch>>,
+    path: String,
+) -> Result<()> {
+    let mut file = File::open(&path).map_err(|e| e.into())?;
+    let file_meta = read_file_metadata(&mut file).map_err(|e| from_arrow_err(&e))?;
+    let reader = FileReader::new(&mut file, file_meta, None);
+    for batch in reader {
+        sender.blocking_send(batch)?;
     }
-
-    fn memory_used(&self) -> usize {}
-
-    fn get_sorted_stream(&self) {}
-
-    fn spill_remaining(&self) {}
+    Ok(())
 }
 
 /// Sort execution plan
@@ -402,14 +440,9 @@ impl ExecutionPlan for ExternalSortExec {
     }
 }
 
-pin_project! {
-    /// stream for sort plan
-    struct ExternalSortStream {
-        #[pin]
-        output: futures::channel::oneshot::Receiver<ArrowResult<Option<RecordBatch>>>,
-        finished: bool,
-        schema: SchemaRef,
-    }
+/// stream for sort plan
+struct ExternalSortStream {
+    schema: SchemaRef,
 }
 
 impl ExternalSortStream {
@@ -492,6 +525,7 @@ mod tests {
     use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
     use crate::physical_plan::expressions::col;
     use crate::physical_plan::memory::MemoryExec;
+    use crate::physical_plan::sorts::SortOptions;
     use crate::physical_plan::{
         collect,
         csv::{CsvExec, CsvReadOptions},
@@ -661,3 +695,5 @@ mod tests {
         Ok(())
     }
 }
+
+impl ExternalSorter {}

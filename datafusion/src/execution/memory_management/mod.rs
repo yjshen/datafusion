@@ -26,11 +26,10 @@ use crate::execution::memory_management::memory_pool::{
 use async_trait::async_trait;
 use hashbrown::{HashMap, HashSet};
 use log::{debug, info};
-use parking_lot::Mutex;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 static mut CONSUMER_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -60,7 +59,7 @@ impl MemoryManager {
     ) -> Result<usize> {
         let partition_id = consumer.partition_id();
         let partition_manager = {
-            let mut all_managers = self.partition_memory_manager.lock();
+            let mut all_managers = self.partition_memory_manager.lock().unwrap();
             all_managers.entry(partition_id).or_insert_with(|| {
                 PartitionMemoryManager::new(partition_id, self.clone())
             })
@@ -128,7 +127,7 @@ impl PartitionMemoryManager {
         required: usize,
         consumer: &dyn MemoryConsumer,
     ) -> Result<usize> {
-        let mut consumers = self.consumers.lock();
+        let mut consumers = self.consumers.lock().unwrap();
         let mut got = self
             .memory_manager
             .acquire_exec_pool_memory(required, consumer);
@@ -154,7 +153,7 @@ impl PartitionMemoryManager {
 
     pub fn show_memory_usage(&self) {
         info!("Memory usage for partition {}", self.partition_id);
-        let mut consumers = self.consumers.lock();
+        let mut consumers = self.consumers.lock().unwrap();
         let mut used = 0;
         for c in consumers.iter() {
             let cur_used = c.get_used();
