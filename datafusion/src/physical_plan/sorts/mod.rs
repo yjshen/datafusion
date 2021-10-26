@@ -24,18 +24,20 @@ pub mod sort_preserving_merge;
 
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::{PhysicalExpr, RecordBatchStream, SendableRecordBatchStream};
-use arrow::array::ord::{build_compare, DynComparator};
+use arrow::array::ord::DynComparator;
 pub use arrow::compute::sort::SortOptions;
 use arrow::record_batch::RecordBatch;
-use arrow::{array::ArrayRef, error::ArrowError, error::Result as ArrowResult};
+use arrow::{array::ArrayRef, error::Result as ArrowResult};
 use futures::channel::mpsc;
 use futures::stream::FusedStream;
 use futures::Stream;
 use hashbrown::HashMap;
-use std::cell::RefCell;
+use std::borrow::BorrowMut;
 use std::cmp::Ordering;
+use std::iter::Zip;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::slice::Iter;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 
 /// A `SortKeyCursor` is created from a `RecordBatch`, and a set of
@@ -59,7 +61,7 @@ struct SortKeyCursor {
     // A collection of comparators that compare rows in this cursor's batch to
     // the cursors in other batches. Other batches are uniquely identified by
     // their batch_idx.
-    batch_comparators: HashMap<usize, Vec<DynComparator>>,
+    batch_comparators: RwLock<HashMap<usize, Vec<DynComparator>>>,
 }
 
 impl std::fmt::Debug for SortKeyCursor {
@@ -85,16 +87,13 @@ impl SortKeyCursor {
             .iter()
             .map(|expr| Ok(expr.evaluate(&batch)?.into_array(batch.num_rows())))
             .collect::<Result<_>>()?;
-        assert_eq!(columns.len(), sort_options.len(),
-                   "Incorrect number of SortOptions provided to SortKeyCursor::compare, expected {} got {}",
-                   columns.len(), sort_options.len());
         Ok(Self {
             cur_row: 0,
             num_rows: batch.num_rows(),
             columns,
             batch,
             batch_idx,
-            batch_comparators: HashMap::new(),
+            batch_comparators: RwLock::new(HashMap::new()),
         })
     }
 
@@ -111,7 +110,7 @@ impl SortKeyCursor {
 
     /// Compares the sort key pointed to by this instance's row cursor with that of another
     fn compare(
-        &mut self,
+        &self,
         other: &SortKeyCursor,
         options: &[SortOptions],
     ) -> Result<Ordering> {
@@ -137,19 +136,20 @@ impl SortKeyCursor {
             .zip(other.columns.iter())
             .zip(options.iter());
 
-        // Recall or initialise a collection of comparators for comparing
-        // columnar arrays of this cursor and "other".
+        self.init_cmp_if_needed(other, zipped)?;
         let cmp = self
             .batch_comparators
-            .entry(other.batch_idx)
-            .or_insert_with(|| Vec::with_capacity(other.columns.len()));
+            .read()
+            .unwrap()
+            .get(&other.batch_idx)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "Failed to find comparator for {} cmp {}",
+                    self.batch_idx, other.batch_idx
+                ))
+            })?;
 
         for (i, ((l, r), sort_options)) in zipped.enumerate() {
-            if i >= cmp.len() {
-                // initialise comparators as potentially needed
-                cmp.push(arrow::array::build_compare(l.as_ref(), r.as_ref())?);
-            }
-
             match (l.is_valid(self.cur_row), r.is_valid(other.cur_row)) {
                 (false, true) if sort_options.nulls_first => return Ok(Ordering::Less),
                 (false, true) => return Ok(Ordering::Greater),
@@ -167,6 +167,33 @@ impl SortKeyCursor {
         }
 
         Ok(Ordering::Equal)
+    }
+
+    /// Initialize a collection of comparators for comparing
+    /// columnar arrays of this cursor and "other" if needed.
+    fn init_cmp_if_needed(
+        &self,
+        other: &SortKeyCursor,
+        zipped: Zip<Zip<Iter<ArrayRef>, Iter<ArrayRef>>, Iter<SortOptions>>,
+    ) -> Result<()> {
+        let hm = self.batch_comparators.read().unwrap();
+        if !hm.contains_key(&other.batch_idx) {
+            let cmp = self
+                .batch_comparators
+                .write()
+                .unwrap()
+                .borrow_mut()
+                .entry(other.batch_idx)
+                .or_insert_with(|| Vec::with_capacity(other.columns.len()));
+
+            for (i, ((l, r), _)) in zipped.enumerate() {
+                if i >= cmp.len() {
+                    // initialise comparators
+                    cmp.push(arrow::array::ord::build_compare(l.as_ref(), r.as_ref())?);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -188,27 +215,27 @@ pub struct SortKeyCursorWrapper<'a, 'b> {
     sort_options: &'b [SortOptions],
 }
 
-impl<'a, 'b> SortKeyCursorWrapper {
-    pub fn new(cursor: &SortKeyCursor, sort_options: &[SortOptions]) -> Self {
+impl<'a, 'b> SortKeyCursorWrapper<'a, 'b> {
+    pub fn new(cursor: &'a SortKeyCursor, sort_options: &'b [SortOptions]) -> Self {
         Self {
             cursor,
             sort_options,
         }
     }
 
-    pub fn compare(&mut self, other: &Self) -> Result<Ordering> {
+    pub fn compare(&self, other: &Self) -> Result<Ordering> {
         self.cursor.compare(other.cursor, self.sort_options)
     }
 }
 
 impl<'a, 'b> Ord for SortKeyCursorWrapper<'a, 'b> {
-    fn cmp(&self, other: &mut Self) -> Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         other.compare(self).unwrap()
     }
 }
 
 impl<'a, 'b> PartialEq for SortKeyCursorWrapper<'a, 'b> {
-    fn eq(&self, other: &mut Self) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         other.compare(self).unwrap() == Ordering::Equal
     }
 }
@@ -216,27 +243,41 @@ impl<'a, 'b> PartialEq for SortKeyCursorWrapper<'a, 'b> {
 impl<'a, 'b> Eq for SortKeyCursorWrapper<'a, 'b> {}
 
 impl<'a, 'b> PartialOrd for SortKeyCursorWrapper<'a, 'b> {
-    fn partial_cmp(&self, other: &mut Self) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         other.compare(self).ok()
     }
 }
 
-enum StreamWrapper {
-    Receiver(mpsc::Receiver<ArrowResult<RecordBatch>>),
-    Stream(Option<SendableRecordBatchStream>),
+#[derive(Debug)]
+pub(crate) struct SpillableStream {
+    pub stream: SendableRecordBatchStream,
+    pub spillable: bool,
 }
 
-impl Drop for StreamWrapper {
-    fn drop(&mut self) {
-        match self {
-            StreamWrapper::Receiver(receiver) => drop(receiver),
-            StreamWrapper::Stream(stream) => {
-                if let Some(s) = stream {
-                    drop(s)
-                }
-            }
+impl SpillableStream {
+    pub(crate) fn new_spillable(stream: SendableRecordBatchStream) -> Self {
+        Self {
+            stream,
+            spillable: true,
         }
     }
+
+    pub(crate) fn new_unspillable(stream: SendableRecordBatchStream) -> Self {
+        Self {
+            stream,
+            spillable: false,
+        }
+    }
+
+    fn into_inner(self) -> SendableRecordBatchStream {
+        self.stream
+    }
+}
+
+#[derive(Debug)]
+enum StreamWrapper {
+    Receiver(mpsc::Receiver<ArrowResult<RecordBatch>>),
+    Stream(Option<SpillableStream>),
 }
 
 impl Stream for StreamWrapper {
@@ -251,7 +292,7 @@ impl Stream for StreamWrapper {
                     Some(inner) => inner,
                 };
 
-                match inner.poll_next(cx) {
+                match inner.stream.poll_next(cx) {
                     Poll::Ready(msg) => {
                         if msg.is_none() {
                             *stream = None

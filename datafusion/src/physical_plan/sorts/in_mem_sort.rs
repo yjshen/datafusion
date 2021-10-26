@@ -15,39 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use super::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use std::any::Any;
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::BinaryHeap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::ord::DynComparator;
-use arrow::array::{growable::make_growable, ord::build_compare, ArrayRef};
+use arrow::array::growable::make_growable;
 use arrow::compute::sort::SortOptions;
 use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
-use async_trait::async_trait;
-use futures::channel::mpsc;
-use futures::stream::FusedStream;
 use futures::{Stream, StreamExt};
-use hashbrown::HashMap;
 
-use crate::error::{DataFusionError, Result};
-use crate::physical_plan::metrics::{
-    BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet,
-};
+use crate::error::Result;
+use crate::physical_plan::metrics::BaselineMetrics;
 use crate::physical_plan::sorts::{RowIndex, SortKeyCursor, SortKeyCursorWrapper};
 use crate::physical_plan::{
-    common::spawn_execution, expressions::PhysicalSortExpr, DisplayFormatType,
-    Distribution, ExecutionPlan, Partitioning, PhysicalExpr, RecordBatchStream,
-    SendableRecordBatchStream, Statistics,
+    expressions::PhysicalSortExpr, ExecutionPlan, PhysicalExpr, RecordBatchStream,
 };
 
-#[derive(Debug)]
 pub(crate) struct InMemSortStream<'a, 'b> {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
@@ -72,7 +59,7 @@ pub(crate) struct InMemSortStream<'a, 'b> {
     min_heap: BinaryHeap<SortKeyCursorWrapper<'a, 'b>>,
 }
 
-impl<'a, 'b> InMemSortStream {
+impl<'a, 'b> InMemSortStream<'a, 'b> {
     pub(crate) fn new(
         mut sorted_batches: Vec<RecordBatch>,
         schema: SchemaRef,
