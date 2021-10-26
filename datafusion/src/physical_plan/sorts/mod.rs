@@ -23,15 +23,20 @@ pub mod sort;
 pub mod sort_preserving_merge;
 
 use crate::error::{DataFusionError, Result};
-use crate::physical_plan::PhysicalExpr;
+use crate::physical_plan::{PhysicalExpr, RecordBatchStream, SendableRecordBatchStream};
 use arrow::array::ord::{build_compare, DynComparator};
 pub use arrow::compute::sort::SortOptions;
 use arrow::record_batch::RecordBatch;
-use arrow::{array::ArrayRef, error::ArrowError};
+use arrow::{array::ArrayRef, error::ArrowError, error::Result as ArrowResult};
+use futures::channel::mpsc;
+use futures::stream::FusedStream;
+use futures::Stream;
 use hashbrown::HashMap;
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// A `SortKeyCursor` is created from a `RecordBatch`, and a set of
 /// `PhysicalExpr` that when evaluated on the `RecordBatch` yield the sort keys.
@@ -213,5 +218,58 @@ impl<'a, 'b> Eq for SortKeyCursorWrapper<'a, 'b> {}
 impl<'a, 'b> PartialOrd for SortKeyCursorWrapper<'a, 'b> {
     fn partial_cmp(&self, other: &mut Self) -> Option<Ordering> {
         other.compare(self).ok()
+    }
+}
+
+enum StreamWrapper {
+    Receiver(mpsc::Receiver<ArrowResult<RecordBatch>>),
+    Stream(Option<SendableRecordBatchStream>),
+}
+
+impl Drop for StreamWrapper {
+    fn drop(&mut self) {
+        match self {
+            StreamWrapper::Receiver(receiver) => drop(receiver),
+            StreamWrapper::Stream(stream) => {
+                if let Some(s) = stream {
+                    drop(s)
+                }
+            }
+        }
+    }
+}
+
+impl Stream for StreamWrapper {
+    type Item = ArrowResult<RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self {
+            StreamWrapper::Receiver(receiver) => receiver.poll_next(cx),
+            StreamWrapper::Stream(ref mut stream) => {
+                let inner = match stream {
+                    None => return Poll::Ready(None),
+                    Some(inner) => inner,
+                };
+
+                match inner.poll_next(cx) {
+                    Poll::Ready(msg) => {
+                        if msg.is_none() {
+                            *stream = None
+                        }
+                        Poll::Ready(msg)
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+impl FusedStream for StreamWrapper {
+    fn is_terminated(&self) -> bool {
+        match self {
+            StreamWrapper::Receiver(receiver) => receiver.is_terminated(),
+            StreamWrapper::Stream(stream) => stream.is_none(),
+        }
     }
 }

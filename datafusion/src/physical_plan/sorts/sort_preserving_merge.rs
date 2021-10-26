@@ -42,7 +42,7 @@ use crate::error::{DataFusionError, Result};
 use crate::physical_plan::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet,
 };
-use crate::physical_plan::sorts::{RowIndex, SortKeyCursor};
+use crate::physical_plan::sorts::{RowIndex, SortKeyCursor, StreamWrapper};
 use crate::physical_plan::{
     common::spawn_execution, expressions::PhysicalSortExpr, DisplayFormatType,
     Distribution, ExecutionPlan, Partitioning, PhysicalExpr, RecordBatchStream,
@@ -163,7 +163,7 @@ impl ExecutionPlan for SortPreservingMergeExec {
                     })
                     .collect();
 
-                Ok(Box::pin(SortPreservingMergeStream::new(
+                Ok(Box::pin(SortPreservingMergeStream::new_from_receiver(
                     streams,
                     self.schema(),
                     &self.expr,
@@ -201,7 +201,7 @@ pub(crate) struct SortPreservingMergeStream {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
     /// The sorted input streams to merge together
-    streams: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
+    streams: Vec<StreamWrapper>,
     /// For each input stream maintain a dequeue of SortKeyCursor
     ///
     /// Exhausted cursors will be popped off the front once all
@@ -225,8 +225,8 @@ pub(crate) struct SortPreservingMergeStream {
 }
 
 impl SortPreservingMergeStream {
-    pub(crate) fn new(
-        streams: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
+    pub(crate) fn new_from_receiver(
+        receivers: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
         schema: SchemaRef,
         expressions: &[PhysicalSortExpr],
         target_batch_size: usize,
@@ -236,6 +236,42 @@ impl SortPreservingMergeStream {
             .into_iter()
             .map(|_| VecDeque::new())
             .collect();
+
+        let streams = receivers
+            .into_iter()
+            .map(|s| StreamWrapper::Receiver(s))
+            .collect();
+
+        Self {
+            schema,
+            cursors,
+            streams,
+            column_expressions: expressions.iter().map(|x| x.expr.clone()).collect(),
+            sort_options: expressions.iter().map(|x| x.options).collect(),
+            target_batch_size,
+            baseline_metrics,
+            aborted: false,
+            in_progress: vec![],
+            next_batch_index: 0,
+        }
+    }
+
+    pub(crate) fn new_from_stream(
+        streams: Vec<SendableRecordBatchStream>,
+        schema: SchemaRef,
+        expressions: &[PhysicalSortExpr],
+        target_batch_size: usize,
+        baseline_metrics: BaselineMetrics,
+    ) -> Self {
+        let cursors = (0..streams.len())
+            .into_iter()
+            .map(|_| VecDeque::new())
+            .collect();
+
+        let streams = streams
+            .into_iter()
+            .map(|s| StreamWrapper::Stream(Some(s)))
+            .collect::<Vec<_>>();
 
         Self {
             schema,
@@ -1079,7 +1115,7 @@ mod tests {
         let metrics = ExecutionPlanMetricsSet::new();
         let baseline_metrics = BaselineMetrics::new(&metrics, 0);
 
-        let merge_stream = SortPreservingMergeStream::new(
+        let merge_stream = SortPreservingMergeStream::new_from_receiver(
             streams,
             batches.schema(),
             sort.as_slice(),
