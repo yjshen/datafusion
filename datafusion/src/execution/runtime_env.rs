@@ -54,6 +54,7 @@ impl RuntimeEnv {
     }
 }
 
+#[derive(Clone)]
 struct RuntimeConfig {
     /// Default batch size when creating new batches
     pub batch_size: usize,

@@ -34,6 +34,7 @@ use futures::Stream;
 use hashbrown::HashMap;
 use std::borrow::BorrowMut;
 use std::cmp::Ordering;
+use std::fmt::{Debug, Formatter};
 use std::iter::Zip;
 use std::pin::Pin;
 use std::slice::Iter;
@@ -248,10 +249,15 @@ impl<'a, 'b> PartialOrd for SortKeyCursorWrapper<'a, 'b> {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct SpillableStream {
     pub stream: SendableRecordBatchStream,
     pub spillable: bool,
+}
+
+impl Debug for SpillableStream {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SpillableStream {}", self.spillable)
+    }
 }
 
 impl SpillableStream {
@@ -284,15 +290,15 @@ impl Stream for StreamWrapper {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self {
-            StreamWrapper::Receiver(receiver) => receiver.poll_next(cx),
+        match self.get_mut() {
+            StreamWrapper::Receiver(ref mut receiver) => Pin::new(receiver).poll_next(cx),
             StreamWrapper::Stream(ref mut stream) => {
                 let inner = match stream {
                     None => return Poll::Ready(None),
                     Some(inner) => inner,
                 };
 
-                match inner.stream.poll_next(cx) {
+                match Pin::new(&mut inner.stream).poll_next(cx) {
                     Poll::Ready(msg) => {
                         if msg.is_none() {
                             *stream = None

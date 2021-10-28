@@ -26,13 +26,13 @@ use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 
 use crate::error::Result;
 use crate::physical_plan::metrics::BaselineMetrics;
 use crate::physical_plan::sorts::{RowIndex, SortKeyCursor, SortKeyCursorWrapper};
 use crate::physical_plan::{
-    expressions::PhysicalSortExpr, ExecutionPlan, PhysicalExpr, RecordBatchStream,
+    expressions::PhysicalSortExpr, PhysicalExpr, RecordBatchStream,
 };
 
 pub(crate) struct InMemSortStream<'a, 'b> {
