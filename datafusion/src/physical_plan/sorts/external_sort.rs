@@ -44,7 +44,7 @@ use arrow::error::Result as ArrowResult;
 use arrow::io::ipc::read::{read_file_metadata, FileReader};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use log::{error, info};
 use std::any::Any;
 use std::fmt;
@@ -351,8 +351,8 @@ fn read_spill(
     mut sender: TKSender<ArrowResult<RecordBatch>>,
     path: String,
 ) -> Result<()> {
-    let mut file = BufReader::new(File::open(&path).map_err(|e| e.into())?);
-    let file_meta = read_file_metadata(&mut file).map_err(|e| e.into())?;
+    let mut file = BufReader::new(File::open(&path)?);
+    let file_meta = read_file_metadata(&mut file)?;
     let reader = FileReader::new(&mut file, file_meta, None);
     for batch in reader {
         sender
@@ -475,12 +475,13 @@ impl ExecutionPlan for ExternalSortExec {
         }
 
         let input = self.input.execute(partition).await?;
+        let ms = self.metrics.clone();
         let mut stream = ExternalSortStream::new(
             input,
             partition,
             self.expr.clone(),
             RUNTIME_ENV.clone(),
-            &self.metrics,
+            &ms,
         );
 
         stream.consume_input().await?;
@@ -524,7 +525,7 @@ impl<'a> ExternalSortStream<'a> {
         partition_id: usize,
         expr: Vec<PhysicalSortExpr>,
         runtime: Arc<RuntimeEnv>,
-        metrics: &ExecutionPlanMetricsSet,
+        metrics: &'a ExecutionPlanMetricsSet,
     ) -> Self {
         let schema = input.schema();
         let sorter =
@@ -553,7 +554,7 @@ impl<'a> Stream for ExternalSortStream<'a> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &self.sorter.output_streamer {
             None => Poll::Ready(None),
-            Some(stream) => stream.poll_next(cx),
+            Some(ref mut stream) => Pin::new(stream).poll_next(cx),
         }
     }
 }

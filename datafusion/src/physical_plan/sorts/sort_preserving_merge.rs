@@ -230,8 +230,8 @@ impl SortPreservingMergeStream {
         stream_idx: usize,
         path: String,
     ) -> Result<usize> {
-        let streams = self.streams.lock().unwrap();
-        let origin_stream = &streams[stream_idx];
+        let streams = self.streams.get_mut().unwrap();
+        let origin_stream = &mut streams[stream_idx];
         match origin_stream {
             StreamWrapper::Receiver(_) => {
                 return Err(DataFusionError::Execution(

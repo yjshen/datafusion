@@ -18,18 +18,17 @@
 pub mod memory_pool;
 
 use crate::error::DataFusionError::OutOfMemory;
-use crate::error::Result;
+use crate::error::{DataFusionError, Result};
 use crate::execution::memory_management::memory_pool::{
     ConstraintExecutionMemoryPool, DummyExecutionMemoryPool, ExecutionMemoryPool,
 };
 use async_trait::async_trait;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use log::{debug, info};
-use std::borrow::BorrowMut;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 static mut CONSUMER_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -41,8 +40,9 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     pub fn new(exec_pool_size: usize) -> Self {
-        let execution_pool = if exec_pool_size == usize::MAX {
-            Arc::new(DummyExecutionMemoryPool::new() as dyn ExecutionMemoryPool)
+        let execution_pool: Arc<dyn ExecutionMemoryPool> = if exec_pool_size == usize::MAX
+        {
+            Arc::new(DummyExecutionMemoryPool::new())
         } else {
             Arc::new(ConstraintExecutionMemoryPool::new(exec_pool_size))
         };
@@ -55,14 +55,14 @@ impl MemoryManager {
     pub fn acquire_exec_memory(
         self: Arc<Self>,
         required: usize,
-        consumer: Arc<dyn MemoryConsumer>,
+        consumer: &MemoryConsumerId,
     ) -> Result<usize> {
-        let partition_id = consumer.partition_id();
+        let partition_id = consumer.partition_id;
         let partition_manager = {
             let mut all_managers = self.partition_memory_manager.lock().unwrap();
-            all_managers.entry(partition_id).or_insert_with(|| {
-                PartitionMemoryManager::new(partition_id, self.clone())
-            })
+            all_managers
+                .entry(partition_id)
+                .or_insert_with(|| PartitionMemoryManager::new(partition_id, self))
         };
         partition_manager.acquire_exec_memory(required, consumer)
     }
@@ -70,7 +70,7 @@ impl MemoryManager {
     pub fn acquire_exec_pool_memory(
         &self,
         required: usize,
-        consumer: &Arc<dyn MemoryConsumer>,
+        consumer: &MemoryConsumerId,
     ) -> usize {
         self.execution_pool.acquire_memory(required, consumer)
     }
@@ -84,7 +84,7 @@ impl MemoryManager {
         &self,
         granted_size: usize,
         real_size: usize,
-        consumer: &dyn MemoryConsumer,
+        consumer: &MemoryConsumerId,
     ) {
         self.execution_pool
             .update_usage(granted_size, real_size, consumer)
@@ -108,29 +108,33 @@ fn next_id() -> usize {
 }
 
 pub struct PartitionMemoryManager {
-    memory_manager: Arc<MemoryManager>,
+    memory_manager: Weak<MemoryManager>,
     partition_id: usize,
-    consumers: Arc<Mutex<HashSet<Arc<dyn MemoryConsumer>>>>,
+    consumers: Arc<Mutex<HashMap<MemoryConsumerId, usize>>>,
 }
 
 impl PartitionMemoryManager {
     pub fn new(partition_id: usize, memory_manager: Arc<MemoryManager>) -> Self {
         Self {
-            memory_manager,
+            memory_manager: Arc::downgrade(&memory_manager),
             partition_id,
-            consumers: Arc::new(Mutex::new(HashSet::new())),
+            consumers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn acquire_exec_memory(
         &mut self,
         required: usize,
-        consumer: Arc<dyn MemoryConsumer>,
+        consumer: &MemoryConsumerId,
     ) -> Result<usize> {
-        let mut consumers = self.consumers.lock().unwrap().borrow_mut();
+        let mut consumers = self.consumers.get_mut().unwrap();
         let mut got = self
             .memory_manager
-            .acquire_exec_pool_memory(required, &consumer);
+            .upgrade()
+            .ok_or_else(|| {
+                DataFusionError::Execution("Failed to get MemoryManager".to_string())
+            })?
+            .acquire_exec_pool_memory(required, consumer);
         if got < required {
             // spill others first
         }
@@ -146,39 +150,46 @@ impl PartitionMemoryManager {
             )));
         }
 
-        consumers.insert(consumer);
-        debug!("{} acquired {}", consumer.str_repr(), got);
+        let entry = consumers.entry(consumer.clone()).or_insert(0);
+        *entry += got;
+
+        debug!("{} acquired {}", consumer, got);
         Ok(got)
     }
 
-    pub fn show_memory_usage(&self) {
+    pub fn show_memory_usage(&self) -> Result<()> {
         info!("Memory usage for partition {}", self.partition_id);
         let mut consumers = self.consumers.lock().unwrap();
         let mut used = 0;
-        for c in consumers.iter() {
-            let cur_used = c.get_used();
+        for (id, c) in consumers.iter() {
+            let cur_used = *c;
             used += cur_used;
             if cur_used > 0 {
                 info!(
                     "Consumer {} acquired {}",
-                    c.str_repr(),
+                    id,
                     human_readable_size(cur_used as usize)
                 )
             }
         }
         let no_consumer_size = self
             .memory_manager
+            .upgrade()
+            .ok_or_else(|| {
+                DataFusionError::Execution("Failed to get MemoryManager".to_string())
+            })?
             .exec_memory_used_for_partition(self.partition_id)
             - (used as usize);
         info!(
             "{} bytes of memory were used for partition {} without specific consumer",
             human_readable_size(no_consumer_size),
             self.partition_id
-        )
+        );
+        Ok(())
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct MemoryConsumerId {
     pub partition_id: usize,
     pub id: usize,
@@ -210,10 +221,10 @@ pub trait MemoryConsumer: Send + Sync + Debug {
         self.id().partition_id
     }
     /// Try allocate `required` bytes as needed
-    fn allocate(self: Arc<Self>, required: usize) -> Result<()> {
+    fn allocate(&self, required: usize) -> Result<()> {
         let got = self
             .memory_manager()
-            .acquire_exec_memory(required, self.clone())?;
+            .acquire_exec_memory(required, self.id())?;
         self.update_used(got as isize);
         Ok(())
     }

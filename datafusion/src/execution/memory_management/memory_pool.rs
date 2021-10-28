@@ -15,28 +15,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::execution::memory_management::MemoryConsumer;
+use crate::execution::memory_management::MemoryConsumerId;
 use hashbrown::HashMap;
 use log::{info, warn};
 use std::cmp::min;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Condvar, Mutex};
 
 pub(crate) trait ExecutionMemoryPool: Sync + Send + Debug {
     fn memory_available(&self) -> usize;
     fn memory_used(&self) -> usize;
     fn memory_used_partition(&self, partition_id: usize) -> usize;
-    fn acquire_memory(
-        &self,
-        required: usize,
-        consumer: &Arc<dyn MemoryConsumer>,
-    ) -> usize;
+    fn acquire_memory(&self, required: usize, consumer: &MemoryConsumerId) -> usize;
     fn update_usage(
         &self,
         granted_size: usize,
         real_size: usize,
-        consumer: &dyn MemoryConsumer,
+        consumer: &MemoryConsumerId,
     );
     fn release_memory(&self, release_size: usize, partition_id: usize);
     fn release_all(&self, partition_id: usize) -> usize;
@@ -75,11 +71,7 @@ impl ExecutionMemoryPool for DummyExecutionMemoryPool {
         0
     }
 
-    fn acquire_memory(
-        &self,
-        required: usize,
-        _consumer: &Arc<dyn MemoryConsumer>,
-    ) -> usize {
+    fn acquire_memory(&self, required: usize, _consumer: &MemoryConsumerId) -> usize {
         required
     }
 
@@ -87,7 +79,7 @@ impl ExecutionMemoryPool for DummyExecutionMemoryPool {
         &self,
         _granted_size: usize,
         _real_size: usize,
-        _consumer: &dyn MemoryConsumer,
+        _consumer: &MemoryConsumerId,
     ) {
     }
 
@@ -142,13 +134,9 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         }
     }
 
-    fn acquire_memory(
-        &self,
-        required: usize,
-        consumer: &Arc<dyn MemoryConsumer>,
-    ) -> usize {
+    fn acquire_memory(&self, required: usize, consumer: &MemoryConsumerId) -> usize {
         assert!(required > 0);
-        let partition_id = consumer.partition_id();
+        let partition_id = consumer.partition_id;
         let mut partition_usage = self.memory_usage.lock().unwrap();
         if !partition_usage.contains_key(&partition_id) {
             partition_usage.entry(partition_id).or_insert(0);
@@ -196,7 +184,7 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         &self,
         granted_size: usize,
         real_size: usize,
-        consumer: &dyn MemoryConsumer,
+        consumer: &MemoryConsumerId,
     ) {
         assert!(granted_size > 0);
         assert!(real_size > 0);
@@ -205,12 +193,12 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         } else {
             let mut partition_usage = self.memory_usage.lock().unwrap();
             if granted_size > real_size {
-                *partition_usage.entry(consumer.partition_id()).or_insert(0) -=
+                *partition_usage.entry(consumer.partition_id).or_insert(0) -=
                     granted_size - real_size;
             } else {
                 // TODO: this would have caused OOM already if size estimation ahead is much smaller than
                 // that of actual allocation
-                *partition_usage.entry(consumer.partition_id()).or_insert(0) +=
+                *partition_usage.entry(consumer.partition_id).or_insert(0) +=
                     real_size - granted_size;
             }
         }
