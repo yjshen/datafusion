@@ -15,6 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! Manages files generated during query execution, files are
+//! hashed among the directories listed in RuntimeConfig::local_dirs.
+
 use crate::error::{DataFusionError, Result};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -23,22 +26,27 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Manages files generated during query execution, e.g. spill files generated
+/// while processing dataset larger than available memory.
 pub struct DiskManager {
     local_dirs: Vec<String>,
 }
 
 impl DiskManager {
+    /// Create local dirs inside user provided dirs through conf
     pub fn new(conf_dirs: &Vec<String>) -> Result<Self> {
         Ok(Self {
             local_dirs: create_local_dirs(conf_dirs)?,
         })
     }
 
+    /// Create a file in conf dirs in randomized manner and return the file path
     pub fn create_tmp_file(&self) -> Result<String> {
         create_tmp_file(&self.local_dirs)
     }
 
-    fn cleanupResource(&mut self) -> Result<()> {
+    #[allow(dead_code)]
+    fn cleanup_resource(&mut self) -> Result<()> {
         for dir in self.local_dirs.drain(..) {
             fs::remove_dir(dir)?;
         }

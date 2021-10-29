@@ -15,6 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! Execution Memory Pool that guarantees a memory allocation strategy
+
+
 use crate::execution::memory_management::MemoryConsumerId;
 use hashbrown::HashMap;
 use log::{info, warn};
@@ -175,7 +178,7 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
                     "{:?} waiting for at least 1/2N of pool to be free",
                     consumer
                 );
-                self.condvar.wait(partition_usage);
+                let _ = self.condvar.wait(partition_usage).unwrap();
             } else {
                 *partition_usage.entry(partition_id).or_insert(0) += to_grant;
                 return to_grant;

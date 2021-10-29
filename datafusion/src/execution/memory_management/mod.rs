@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! Manages all available memory during query execution
+
 pub mod memory_pool;
 
 use crate::error::DataFusionError::OutOfMemory;
@@ -33,12 +35,15 @@ use std::sync::{Arc, Mutex, Weak};
 static mut CONSUMER_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone)]
+/// Memory manager that enforces how execution memory is shared between all kinds of memory consumers.
+/// Execution memory refers to that used for computation in sorts, aggregations, joins and shuffles.
 pub struct MemoryManager {
     execution_pool: Arc<dyn ExecutionMemoryPool>,
     partition_memory_manager: Arc<Mutex<HashMap<usize, PartitionMemoryManager>>>,
 }
 
 impl MemoryManager {
+    /// Create memory manager based on configured execution pool size.
     pub fn new(exec_pool_size: usize) -> Self {
         let execution_pool: Arc<dyn ExecutionMemoryPool> = if exec_pool_size == usize::MAX
         {
@@ -52,6 +57,7 @@ impl MemoryManager {
         }
     }
 
+    /// Acquire size of `required` memory from manager
     pub fn acquire_exec_memory(
         self: Arc<Self>,
         required: usize,
@@ -65,7 +71,7 @@ impl MemoryManager {
         partition_manager.acquire_exec_memory(required, consumer)
     }
 
-    pub fn acquire_exec_pool_memory(
+    pub(crate) fn acquire_exec_pool_memory(
         &self,
         required: usize,
         consumer: &MemoryConsumerId,
@@ -73,12 +79,12 @@ impl MemoryManager {
         self.execution_pool.acquire_memory(required, consumer)
     }
 
-    pub fn release_exec_pool_memory(&self, release_size: usize, partition_id: usize) {
+    pub(crate) fn release_exec_pool_memory(&self, release_size: usize, partition_id: usize) {
         self.execution_pool
             .release_memory(release_size, partition_id)
     }
 
-    pub fn update_exec_pool_usage(
+    pub(crate) fn update_exec_pool_usage(
         &self,
         granted_size: usize,
         real_size: usize,
@@ -88,15 +94,15 @@ impl MemoryManager {
             .update_usage(granted_size, real_size, consumer)
     }
 
-    pub fn release_all_exec_pool_for_partition(&self, partition_id: usize) -> usize {
+    pub(crate) fn release_all_exec_pool_for_partition(&self, partition_id: usize) -> usize {
         self.execution_pool.release_all(partition_id)
     }
 
-    pub fn exec_memory_used(&self) -> usize {
+    pub(crate) fn exec_memory_used(&self) -> usize {
         self.execution_pool.memory_used()
     }
 
-    pub fn exec_memory_used_for_partition(&self, partition_id: usize) -> usize {
+    pub(crate) fn exec_memory_used_for_partition(&self, partition_id: usize) -> usize {
         self.execution_pool.memory_used_partition(partition_id)
     }
 }

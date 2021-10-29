@@ -45,8 +45,6 @@ pub(crate) struct InMemSortStream {
     bathes: Vec<Arc<RecordBatch>>,
     /// The accumulated row indexes for the next record batch
     in_progress: Vec<RowIndex>,
-    /// The physical expressions to sort by
-    column_expressions: Vec<Arc<dyn PhysicalExpr>>,
     /// The desired RecordBatch size to yield
     target_batch_size: usize,
     /// used to record execution metrics
@@ -98,7 +96,6 @@ impl InMemSortStream {
         Ok(Self {
             schema,
             bathes: cursors,
-            column_expressions,
             target_batch_size,
             baseline_metrics,
             aborted: false,

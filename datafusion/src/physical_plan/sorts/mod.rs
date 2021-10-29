@@ -267,10 +267,6 @@ impl SpillableStream {
             spillable: false,
         }
     }
-
-    fn into_inner(self) -> SendableRecordBatchStream {
-        self.stream
-    }
 }
 
 #[derive(Debug)]
