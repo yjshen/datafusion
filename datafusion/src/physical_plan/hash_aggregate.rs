@@ -739,7 +739,7 @@ pin_project! {
 
 /// Special case aggregate with no groups
 async fn compute_hash_aggregate(
-    id: MemoryConsumerId,
+    _id: MemoryConsumerId,
     mode: AggregateMode,
     schema: SchemaRef,
     aggr_expr: Vec<Arc<dyn AggregateExpr>>,

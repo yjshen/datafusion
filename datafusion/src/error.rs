@@ -132,6 +132,9 @@ impl Display for DataFusionError {
             DataFusionError::Execution(ref desc) => {
                 write!(f, "Execution error: {}", desc)
             }
+            DataFusionError::OutOfMemory(ref desc) => {
+                write!(f, "Out of memory error: {}", desc)
+            }
         }
     }
 }

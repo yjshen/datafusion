@@ -71,7 +71,8 @@ use datafusion::physical_plan::{
     limit::{GlobalLimitExec, LocalLimitExec},
     projection::ProjectionExec,
     repartition::RepartitionExec,
-    sort::{SortExec, SortOptions},
+    sorts::sort::SortExec,
+    sorts::SortOptions,
     Partitioning,
 };
 use datafusion::physical_plan::{

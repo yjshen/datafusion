@@ -30,25 +30,23 @@ use futures::Stream;
 
 use crate::error::Result;
 use crate::physical_plan::metrics::BaselineMetrics;
-use crate::physical_plan::sorts::{RowIndex, SortKeyCursor, SortKeyCursorWrapper};
+use crate::physical_plan::sorts::{RowIndex, SortKeyCursor};
 use crate::physical_plan::{
     expressions::PhysicalSortExpr, PhysicalExpr, RecordBatchStream,
 };
 
-pub(crate) struct InMemSortStream<'a, 'b> {
+pub(crate) struct InMemSortStream {
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
     /// For each input stream maintain a dequeue of SortKeyCursor
     ///
     /// Exhausted cursors will be popped off the front once all
     /// their rows have been yielded to the output
-    cursors: Vec<SortKeyCursor>,
+    bathes: Vec<Arc<RecordBatch>>,
     /// The accumulated row indexes for the next record batch
     in_progress: Vec<RowIndex>,
     /// The physical expressions to sort by
     column_expressions: Vec<Arc<dyn PhysicalExpr>>,
-    /// The sort options for each expression
-    sort_options: Vec<SortOptions>,
     /// The desired RecordBatch size to yield
     target_batch_size: usize,
     /// used to record execution metrics
@@ -56,12 +54,12 @@ pub(crate) struct InMemSortStream<'a, 'b> {
     /// If the stream has encountered an error
     aborted: bool,
     /// min heap for record comparison
-    min_heap: BinaryHeap<SortKeyCursorWrapper<'a, 'b>>,
+    min_heap: BinaryHeap<SortKeyCursor>,
 }
 
-impl<'a, 'b> InMemSortStream<'a, 'b> {
+impl InMemSortStream {
     pub(crate) fn new(
-        mut sorted_batches: Vec<RecordBatch>,
+        sorted_batches: Vec<RecordBatch>,
         schema: SchemaRef,
         expressions: &[PhysicalSortExpr],
         target_batch_size: usize,
@@ -74,28 +72,33 @@ impl<'a, 'b> InMemSortStream<'a, 'b> {
         let column_expressions: Vec<Arc<dyn PhysicalExpr>> =
             expressions.iter().map(|x| x.expr.clone()).collect();
 
-        let sort_options: Vec<SortOptions> =
-            expressions.iter().map(|x| x.options).collect();
+        // The sort options for each expression
+        let sort_options: Arc<Vec<SortOptions>> =
+            Arc::new(expressions.iter().map(|x| x.options).collect());
 
         sorted_batches
             .into_iter()
             .enumerate()
             .try_for_each(|(idx, batch)| {
-                let cursor = match SortKeyCursor::new(idx, batch, &column_expressions) {
+                let batch = Arc::new(batch);
+                let cursor = match SortKeyCursor::new(
+                    idx,
+                    batch.clone(),
+                    &column_expressions,
+                    sort_options.clone(),
+                ) {
                     Ok(cursor) => cursor,
                     Err(e) => return Err(e),
                 };
-                let wrapper = SortKeyCursorWrapper::new(&cursor, &sort_options);
-                min_heap.push(wrapper);
-                cursors[idx] = cursor;
+                min_heap.push(cursor);
+                cursors[idx] = batch;
                 Ok(())
             })?;
 
         Ok(Self {
             schema,
-            cursors,
+            bathes: cursors,
             column_expressions,
-            sort_options,
             target_batch_size,
             baseline_metrics,
             aborted: false,
@@ -106,10 +109,10 @@ impl<'a, 'b> InMemSortStream<'a, 'b> {
 
     /// Returns the index of the next batch to pull a row from, or None
     /// if all cursors for all batch are exhausted
-    fn next_batch_idx(&mut self) -> Result<Option<usize>> {
+    fn next_cursor(&mut self) -> Result<Option<SortKeyCursor>> {
         match self.min_heap.pop() {
             None => Ok(None),
-            Some(batch) => Ok(Some(batch.cursor.batch_idx)),
+            Some(cursor) => Ok(Some(cursor)),
         }
     }
 
@@ -124,9 +127,9 @@ impl<'a, 'b> InMemSortStream<'a, 'b> {
             .enumerate()
             .map(|(column_idx, _)| {
                 let arrays = self
-                    .cursors
+                    .bathes
                     .iter()
-                    .map(|cursor| cursor.batch.column(column_idx).as_ref())
+                    .map(|batch| batch.column(column_idx).as_ref())
                     .collect::<Vec<_>>();
 
                 let mut array_data =
@@ -188,8 +191,22 @@ impl<'a, 'b> InMemSortStream<'a, 'b> {
             let elapsed_compute = self.baseline_metrics.elapsed_compute().clone();
             let _timer = elapsed_compute.timer();
 
-            let batch_idx = match self.next_batch_idx() {
-                Ok(Some(idx)) => idx,
+            match self.next_cursor() {
+                Ok(Some(mut cursor)) => {
+                    let batch_idx = cursor.batch_idx;
+                    let row_idx = cursor.advance();
+
+                    // insert the cursor back to min_heap if the record batch is not exhausted
+                    if !cursor.is_finished() {
+                        self.min_heap.push(cursor);
+                    }
+
+                    self.in_progress.push(RowIndex {
+                        stream_idx: batch_idx,
+                        cursor_idx: 0,
+                        row_idx,
+                    });
+                }
                 Ok(None) if self.in_progress.is_empty() => return Poll::Ready(None),
                 Ok(None) => return Poll::Ready(Some(self.build_record_batch())),
                 Err(e) => {
@@ -201,21 +218,6 @@ impl<'a, 'b> InMemSortStream<'a, 'b> {
                 }
             };
 
-            let cursor = &mut self.cursors[batch_idx];
-            let row_idx = cursor.advance();
-
-            // insert the cursor back to min_heap if the record batch is not exhausted
-            if !cursor.is_finished() {
-                self.min_heap
-                    .push(SortKeyCursorWrapper::new(cursor, &self.sort_options));
-            }
-
-            self.in_progress.push(RowIndex {
-                stream_idx: batch_idx,
-                cursor_idx: 0,
-                row_idx,
-            });
-
             if self.in_progress.len() == self.target_batch_size {
                 return Poll::Ready(Some(self.build_record_batch()));
             }
@@ -223,7 +225,7 @@ impl<'a, 'b> InMemSortStream<'a, 'b> {
     }
 }
 
-impl<'a, 'b> Stream for InMemSortStream<'a, 'b> {
+impl Stream for InMemSortStream {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(
@@ -235,7 +237,7 @@ impl<'a, 'b> Stream for InMemSortStream<'a, 'b> {
     }
 }
 
-impl<'a, 'b> RecordBatchStream for InMemSortStream<'a, 'b> {
+impl RecordBatchStream for InMemSortStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

@@ -35,9 +35,7 @@ use hashbrown::HashMap;
 use std::borrow::BorrowMut;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Formatter};
-use std::iter::Zip;
 use std::pin::Pin;
-use std::slice::Iter;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 
@@ -57,12 +55,13 @@ struct SortKeyCursor {
 
     // An index uniquely identifying the record batch scanned by this cursor.
     batch_idx: usize,
-    batch: RecordBatch,
+    batch: Arc<RecordBatch>,
 
     // A collection of comparators that compare rows in this cursor's batch to
     // the cursors in other batches. Other batches are uniquely identified by
     // their batch_idx.
     batch_comparators: RwLock<HashMap<usize, Vec<DynComparator>>>,
+    sort_options: Arc<Vec<SortOptions>>,
 }
 
 impl std::fmt::Debug for SortKeyCursor {
@@ -81,8 +80,9 @@ impl std::fmt::Debug for SortKeyCursor {
 impl SortKeyCursor {
     fn new(
         batch_idx: usize,
-        batch: RecordBatch,
+        batch: Arc<RecordBatch>,
         sort_key: &[Arc<dyn PhysicalExpr>],
+        sort_options: Arc<Vec<SortOptions>>,
     ) -> Result<Self> {
         let columns: Vec<ArrayRef> = sort_key
             .iter()
@@ -95,6 +95,7 @@ impl SortKeyCursor {
             batch,
             batch_idx,
             batch_comparators: RwLock::new(HashMap::new()),
+            sort_options,
         })
     }
 
@@ -110,11 +111,7 @@ impl SortKeyCursor {
     }
 
     /// Compares the sort key pointed to by this instance's row cursor with that of another
-    fn compare(
-        &self,
-        other: &SortKeyCursor,
-        options: &[SortOptions],
-    ) -> Result<Ordering> {
+    fn compare(&self, other: &SortKeyCursor) -> Result<Ordering> {
         if self.columns.len() != other.columns.len() {
             return Err(DataFusionError::Internal(format!(
                 "SortKeyCursors had inconsistent column counts: {} vs {}",
@@ -123,34 +120,32 @@ impl SortKeyCursor {
             )));
         }
 
-        if self.columns.len() != options.len() {
+        if self.columns.len() != self.sort_options.len() {
             return Err(DataFusionError::Internal(format!(
                 "Incorrect number of SortOptions provided to SortKeyCursor::compare, expected {} got {}",
                 self.columns.len(),
-                options.len()
+                self.sort_options.len()
             )));
         }
 
-        let zipped = self
+        let zipped: Vec<((&ArrayRef, &ArrayRef), &SortOptions)> = self
             .columns
             .iter()
             .zip(other.columns.iter())
-            .zip(options.iter());
+            .zip(self.sort_options.iter())
+            .collect::<Vec<_>>();
 
-        self.init_cmp_if_needed(other, zipped)?;
-        let cmp = self
-            .batch_comparators
-            .read()
-            .unwrap()
-            .get(&other.batch_idx)
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "Failed to find comparator for {} cmp {}",
-                    self.batch_idx, other.batch_idx
-                ))
-            })?;
+        self.init_cmp_if_needed(other, &zipped)?;
 
-        for (i, ((l, r), sort_options)) in zipped.enumerate() {
+        let map = self.batch_comparators.read().unwrap();
+        let cmp = map.get(&other.batch_idx).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "Failed to find comparator for {} cmp {}",
+                self.batch_idx, other.batch_idx
+            ))
+        })?;
+
+        for (i, ((l, r), sort_options)) in zipped.iter().enumerate() {
             match (l.is_valid(self.cur_row), r.is_valid(other.cur_row)) {
                 (false, true) if sort_options.nulls_first => return Ok(Ordering::Less),
                 (false, true) => return Ok(Ordering::Greater),
@@ -175,19 +170,17 @@ impl SortKeyCursor {
     fn init_cmp_if_needed(
         &self,
         other: &SortKeyCursor,
-        zipped: Zip<Zip<Iter<ArrayRef>, Iter<ArrayRef>>, Iter<SortOptions>>,
+        zipped: &Vec<((&ArrayRef, &ArrayRef), &SortOptions)>,
     ) -> Result<()> {
         let hm = self.batch_comparators.read().unwrap();
         if !hm.contains_key(&other.batch_idx) {
-            let cmp = self
-                .batch_comparators
-                .write()
-                .unwrap()
+            let mut map = self.batch_comparators.write().unwrap();
+            let cmp = map
                 .borrow_mut()
                 .entry(other.batch_idx)
                 .or_insert_with(|| Vec::with_capacity(other.columns.len()));
 
-            for (i, ((l, r), _)) in zipped.enumerate() {
+            for (i, ((l, r), _)) in zipped.iter().enumerate() {
                 if i >= cmp.len() {
                     // initialise comparators
                     cmp.push(arrow::array::ord::build_compare(l.as_ref(), r.as_ref())?);
@@ -211,39 +204,39 @@ struct RowIndex {
     row_idx: usize,
 }
 
-pub struct SortKeyCursorWrapper<'a, 'b> {
-    cursor: &'a SortKeyCursor,
-    sort_options: &'b [SortOptions],
-}
+// pub struct SortKeyCursorWrapper<'a, 'b> {
+//     cursor: &'a SortKeyCursor,
+//     sort_options: &'b [SortOptions],
+// }
+//
+// impl<'a, 'b> SortKeyCursorWrapper<'a, 'b> {
+//     pub fn new(cursor: &'a SortKeyCursor, sort_options: &'b [SortOptions]) -> Self {
+//         Self {
+//             cursor,
+//             sort_options,
+//         }
+//     }
+//
+//     pub fn compare(&self, other: &Self) -> Result<Ordering> {
+//         self.cursor.compare(other.cursor, self.sort_options)
+//     }
+// }
 
-impl<'a, 'b> SortKeyCursorWrapper<'a, 'b> {
-    pub fn new(cursor: &'a SortKeyCursor, sort_options: &'b [SortOptions]) -> Self {
-        Self {
-            cursor,
-            sort_options,
-        }
-    }
-
-    pub fn compare(&self, other: &Self) -> Result<Ordering> {
-        self.cursor.compare(other.cursor, self.sort_options)
-    }
-}
-
-impl<'a, 'b> Ord for SortKeyCursorWrapper<'a, 'b> {
+impl Ord for SortKeyCursor {
     fn cmp(&self, other: &Self) -> Ordering {
         other.compare(self).unwrap()
     }
 }
 
-impl<'a, 'b> PartialEq for SortKeyCursorWrapper<'a, 'b> {
+impl PartialEq for SortKeyCursor {
     fn eq(&self, other: &Self) -> bool {
         other.compare(self).unwrap() == Ordering::Equal
     }
 }
 
-impl<'a, 'b> Eq for SortKeyCursorWrapper<'a, 'b> {}
+impl Eq for SortKeyCursor {}
 
-impl<'a, 'b> PartialOrd for SortKeyCursorWrapper<'a, 'b> {
+impl PartialOrd for SortKeyCursor {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         other.compare(self).ok()
     }

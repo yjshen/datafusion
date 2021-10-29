@@ -38,8 +38,8 @@ impl DiskManager {
         create_tmp_file(&self.local_dirs)
     }
 
-    fn cleanupResource(&self) -> Result<()> {
-        for dir in self.local_dirs {
+    fn cleanupResource(&mut self) -> Result<()> {
+        for dir in self.local_dirs.drain(..) {
             fs::remove_dir(dir)?;
         }
         Ok(())
