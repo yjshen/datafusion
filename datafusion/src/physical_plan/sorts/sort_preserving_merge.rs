@@ -212,7 +212,7 @@ pub(crate) struct SortPreservingMergeStream {
     /// The physical expressions to sort by
     column_expressions: Vec<Arc<dyn PhysicalExpr>>,
     /// The sort options for each expression
-    sort_options: Vec<SortOptions>,
+    sort_options: Arc<Vec<SortOptions>>,
     /// The desired RecordBatch size to yield
     target_batch_size: usize,
     /// used to record execution metrics
@@ -284,7 +284,7 @@ impl SortPreservingMergeStream {
             cursors,
             streams,
             column_expressions: expressions.iter().map(|x| x.expr.clone()).collect(),
-            sort_options: expressions.iter().map(|x| x.options).collect(),
+            sort_options: Arc::new(expressions.iter().map(|x| x.options).collect()),
             target_batch_size,
             baseline_metrics,
             aborted: false,
@@ -316,7 +316,7 @@ impl SortPreservingMergeStream {
             cursors,
             streams,
             column_expressions: expressions.iter().map(|x| x.expr.clone()).collect(),
-            sort_options: expressions.iter().map(|x| x.options).collect(),
+            sort_options: Arc::new(expressions.iter().map(|x| x.options).collect()),
             target_batch_size,
             baseline_metrics,
             aborted: false,
@@ -340,7 +340,7 @@ impl SortPreservingMergeStream {
             }
         }
 
-        let streams = self.streams.lock().unwrap();
+        let mut streams = self.streams.lock().unwrap();
 
         let stream = &mut streams[idx];
         if stream.is_terminated() {
@@ -356,8 +356,9 @@ impl SortPreservingMergeStream {
             Some(Ok(batch)) => {
                 let cursor = match SortKeyCursor::new(
                     self.next_batch_index, // assign this batch an ID
-                    batch,
+                    Arc::new(batch),
                     &self.column_expressions,
+                    self.sort_options.clone(),
                 ) {
                     Ok(cursor) => cursor,
                     Err(e) => {
@@ -388,9 +389,7 @@ impl SortPreservingMergeStream {
                 match min_cursor {
                     None => min_cursor = Some((idx, candidate)),
                     Some((_, ref mut min)) => {
-                        if min.compare(candidate, &self.sort_options)?
-                            == Ordering::Greater
-                        {
+                        if min.compare(candidate)? == Ordering::Greater {
                             min_cursor = Some((idx, candidate))
                         }
                     }

@@ -58,12 +58,10 @@ impl MemoryManager {
         consumer: &MemoryConsumerId,
     ) -> Result<usize> {
         let partition_id = consumer.partition_id;
-        let partition_manager = {
-            let mut all_managers = self.partition_memory_manager.lock().unwrap();
-            all_managers
-                .entry(partition_id)
-                .or_insert_with(|| PartitionMemoryManager::new(partition_id, self))
-        };
+        let mut all_managers = self.partition_memory_manager.lock().unwrap();
+        let partition_manager = all_managers
+            .entry(partition_id)
+            .or_insert_with(|| PartitionMemoryManager::new(partition_id, self.clone()));
         partition_manager.acquire_exec_memory(required, consumer)
     }
 
@@ -110,7 +108,7 @@ fn next_id() -> usize {
 pub struct PartitionMemoryManager {
     memory_manager: Weak<MemoryManager>,
     partition_id: usize,
-    consumers: Arc<Mutex<HashMap<MemoryConsumerId, usize>>>,
+    consumers: Mutex<HashMap<MemoryConsumerId, usize>>,
 }
 
 impl PartitionMemoryManager {
@@ -118,7 +116,7 @@ impl PartitionMemoryManager {
         Self {
             memory_manager: Arc::downgrade(&memory_manager),
             partition_id,
-            consumers: Arc::new(Mutex::new(HashMap::new())),
+            consumers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -127,8 +125,8 @@ impl PartitionMemoryManager {
         required: usize,
         consumer: &MemoryConsumerId,
     ) -> Result<usize> {
-        let mut consumers = self.consumers.get_mut().unwrap();
-        let mut got = self
+        let consumers = self.consumers.get_mut().unwrap();
+        let got = self
             .memory_manager
             .upgrade()
             .ok_or_else(|| {
@@ -159,7 +157,7 @@ impl PartitionMemoryManager {
 
     pub fn show_memory_usage(&self) -> Result<()> {
         info!("Memory usage for partition {}", self.partition_id);
-        let mut consumers = self.consumers.lock().unwrap();
+        let consumers = self.consumers.lock().unwrap();
         let mut used = 0;
         for (id, c) in consumers.iter() {
             let cur_used = *c;
@@ -229,7 +227,8 @@ pub trait MemoryConsumer: Send + Sync + Debug {
         Ok(())
     }
     /// Spill at least `size` bytes to disk and frees memory
-    async fn spill(&self, size: usize, trigger: &dyn MemoryConsumer) -> Result<usize>;
+    async fn spill(&mut self, size: usize, trigger: &dyn MemoryConsumer)
+        -> Result<usize>;
     /// Get current memory usage for the consumer itself
     fn get_used(&self) -> isize;
 

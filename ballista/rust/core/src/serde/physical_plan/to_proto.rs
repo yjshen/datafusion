@@ -40,7 +40,7 @@ use datafusion::physical_plan::hash_join::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::parquet::{ParquetExec, ParquetPartition};
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::sort::SortExec;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::{
     physical_plan::expressions::{Count, Literal},
     scalar::ScalarValue,

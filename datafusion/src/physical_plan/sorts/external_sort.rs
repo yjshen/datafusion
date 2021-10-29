@@ -58,7 +58,7 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc::{Receiver as TKReceiver, Sender as TKSender};
 use tokio::task;
 
-struct ExternalSorter<'a> {
+struct ExternalSorter {
     id: MemoryConsumerId,
     schema: SchemaRef,
     in_mem_batches: Mutex<Vec<RecordBatch>>,
@@ -67,7 +67,7 @@ struct ExternalSorter<'a> {
     expr: Vec<PhysicalSortExpr>,
     output_streamer: Option<SortPreservingMergeStream>,
     runtime: Arc<RuntimeEnv>,
-    metrics: &'a ExecutionPlanMetricsSet,
+    metrics: ExecutionPlanMetricsSet,
     used: AtomicIsize,
     spilled_bytes: AtomicUsize,
     spilled_count: AtomicUsize,
@@ -75,13 +75,12 @@ struct ExternalSorter<'a> {
     output_all_disk: AtomicBool,
 }
 
-impl<'a> ExternalSorter<'a> {
+impl ExternalSorter {
     pub fn new(
         partition_id: usize,
         schema: SchemaRef,
         expr: Vec<PhysicalSortExpr>,
         runtime: Arc<RuntimeEnv>,
-        metrics: &'a ExecutionPlanMetricsSet,
     ) -> Self {
         Self {
             id: MemoryConsumerId::new(partition_id),
@@ -91,7 +90,7 @@ impl<'a> ExternalSorter<'a> {
             expr,
             output_streamer: None,
             runtime,
-            metrics,
+            metrics: ExecutionPlanMetricsSet::new(),
             used: AtomicIsize::new(0),
             spilled_bytes: AtomicUsize::new(0),
             spilled_count: AtomicUsize::new(0),
@@ -186,7 +185,7 @@ impl<'a> ExternalSorter<'a> {
     }
 }
 
-impl<'a> Debug for ExternalSorter<'a> {
+impl Debug for ExternalSorter {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExternalSorter")
             .field("id", &self.id())
@@ -198,7 +197,7 @@ impl<'a> Debug for ExternalSorter<'a> {
 }
 
 #[async_trait]
-impl<'a> MemoryConsumer for ExternalSorter<'a> {
+impl MemoryConsumer for ExternalSorter {
     fn name(&self) -> String {
         "ExternalSorter".to_owned()
     }
@@ -211,7 +210,11 @@ impl<'a> MemoryConsumer for ExternalSorter<'a> {
         self.runtime.memory_manager.clone()
     }
 
-    async fn spill(&self, _size: usize, _trigger: &dyn MemoryConsumer) -> Result<usize> {
+    async fn spill(
+        &mut self,
+        _size: usize,
+        _trigger: &dyn MemoryConsumer,
+    ) -> Result<usize> {
         if !self.insert_finished.load(Ordering::SeqCst) {
             let total_size = self.spill_while_inserting().await;
             total_size
@@ -225,6 +228,7 @@ impl<'a> MemoryConsumer for ExternalSorter<'a> {
             let path = self.runtime.disk_manager.create_tmp_file()?;
             let total_size = self
                 .output_streamer
+                .as_mut()
                 .unwrap()
                 .spill_underlying_stream(0, path)
                 .await;
@@ -347,10 +351,7 @@ fn write_sorted(
     Ok(writer.num_bytes as usize)
 }
 
-fn read_spill(
-    mut sender: TKSender<ArrowResult<RecordBatch>>,
-    path: String,
-) -> Result<()> {
+fn read_spill(sender: TKSender<ArrowResult<RecordBatch>>, path: String) -> Result<()> {
     let mut file = BufReader::new(File::open(&path)?);
     let file_meta = read_file_metadata(&mut file)?;
     let reader = FileReader::new(&mut file, file_meta, None);
@@ -475,13 +476,11 @@ impl ExecutionPlan for ExternalSortExec {
         }
 
         let input = self.input.execute(partition).await?;
-        let ms = self.metrics.clone();
         let mut stream = ExternalSortStream::new(
             input,
             partition,
             self.expr.clone(),
             RUNTIME_ENV.clone(),
-            &ms,
         );
 
         stream.consume_input().await?;
@@ -513,23 +512,21 @@ impl ExecutionPlan for ExternalSortExec {
 }
 
 /// stream for sort plan
-struct ExternalSortStream<'a> {
+struct ExternalSortStream {
     schema: SchemaRef,
-    sorter: ExternalSorter<'a>,
+    sorter: ExternalSorter,
     input: SendableRecordBatchStream,
 }
 
-impl<'a> ExternalSortStream<'a> {
+impl ExternalSortStream {
     fn new(
         input: SendableRecordBatchStream,
         partition_id: usize,
         expr: Vec<PhysicalSortExpr>,
         runtime: Arc<RuntimeEnv>,
-        metrics: &'a ExecutionPlanMetricsSet,
     ) -> Self {
         let schema = input.schema();
-        let sorter =
-            ExternalSorter::new(partition_id, schema.clone(), expr, runtime, metrics);
+        let sorter = ExternalSorter::new(partition_id, schema.clone(), expr, runtime);
 
         Self {
             schema: schema.clone(),
@@ -548,18 +545,18 @@ impl<'a> ExternalSortStream<'a> {
     }
 }
 
-impl<'a> Stream for ExternalSortStream<'a> {
+impl Stream for ExternalSortStream {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match &self.sorter.output_streamer {
+        match self.get_mut().sorter.output_streamer {
             None => Poll::Ready(None),
             Some(ref mut stream) => Pin::new(stream).poll_next(cx),
         }
     }
 }
 
-impl<'a> RecordBatchStream for ExternalSortStream<'a> {
+impl RecordBatchStream for ExternalSortStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

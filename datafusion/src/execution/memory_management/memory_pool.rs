@@ -137,16 +137,19 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
     fn acquire_memory(&self, required: usize, consumer: &MemoryConsumerId) -> usize {
         assert!(required > 0);
         let partition_id = consumer.partition_id;
-        let mut partition_usage = self.memory_usage.lock().unwrap();
-        if !partition_usage.contains_key(&partition_id) {
-            partition_usage.entry(partition_id).or_insert(0);
-            self.condvar.notify_all();
+        {
+            let mut partition_usage = self.memory_usage.lock().unwrap();
+            if !partition_usage.contains_key(&partition_id) {
+                partition_usage.entry(partition_id).or_insert(0);
+                self.condvar.notify_all();
+            }
         }
 
         // Keep looping until we're either sure that we don't want to grant this request (because this
         // partition would have more than 1 / num_active_partition of the memory) or we have enough free
         // memory to give it (we always let each partition get at least 1 / (2 * num_active_partition)).
         loop {
+            let mut partition_usage = self.memory_usage.lock().unwrap();
             let num_active_partition = partition_usage.len();
             let current_mem = *partition_usage.get(&partition_id).unwrap();
 
@@ -234,7 +237,7 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         let mut partition_usage = self.memory_usage.lock().unwrap();
         let mut current_mem = 0;
         match partition_usage.get(&partition_id) {
-            None => return 0,
+            None => return current_mem,
             Some(v) => current_mem = *v,
         }
 

@@ -70,7 +70,8 @@ use datafusion::physical_plan::{
     parquet::ParquetExec,
     projection::ProjectionExec,
     repartition::RepartitionExec,
-    sort::{SortExec, SortOptions},
+    sorts::sort::SortExec,
+    sorts::SortOptions,
     Partitioning,
 };
 use datafusion::physical_plan::{

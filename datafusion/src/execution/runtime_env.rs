@@ -55,7 +55,7 @@ impl RuntimeEnv {
 }
 
 #[derive(Clone)]
-struct RuntimeConfig {
+pub struct RuntimeConfig {
     /// Default batch size when creating new batches
     pub batch_size: usize,
     /// Max execution memory allowed for DataFusion
