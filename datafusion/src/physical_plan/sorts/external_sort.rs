@@ -36,7 +36,7 @@ use crate::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeStrea
 use crate::physical_plan::sorts::SpillableStream;
 use crate::physical_plan::stream::RecordBatchReceiverStream;
 use crate::physical_plan::{
-    DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
     SendableRecordBatchStream, Statistics,
 };
 use arrow::datatypes::SchemaRef;
@@ -44,17 +44,16 @@ use arrow::error::Result as ArrowResult;
 use arrow::io::ipc::read::{read_file_metadata, FileReader};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::lock::Mutex;
+use futures::StreamExt;
 use log::{error, info};
 use std::any::Any;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::BufReader;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver as TKReceiver, Sender as TKSender};
 use tokio::task;
 
@@ -65,14 +64,12 @@ struct ExternalSorter {
     spills: Mutex<Vec<String>>,
     /// Sort expressions
     expr: Vec<PhysicalSortExpr>,
-    output_streamer: Option<SortPreservingMergeStream>,
     runtime: Arc<RuntimeEnv>,
     metrics: ExecutionPlanMetricsSet,
     used: AtomicIsize,
     spilled_bytes: AtomicUsize,
     spilled_count: AtomicUsize,
     insert_finished: AtomicBool,
-    output_all_disk: AtomicBool,
 }
 
 impl ExternalSorter {
@@ -88,14 +85,12 @@ impl ExternalSorter {
             in_mem_batches: Mutex::new(vec![]),
             spills: Mutex::new(vec![]),
             expr,
-            output_streamer: None,
             runtime,
             metrics: ExecutionPlanMetricsSet::new(),
             used: AtomicIsize::new(0),
             spilled_bytes: AtomicUsize::new(0),
             spilled_count: AtomicUsize::new(0),
             insert_finished: AtomicBool::new(false),
-            output_all_disk: AtomicBool::new(false),
         }
     }
 
@@ -103,7 +98,7 @@ impl ExternalSorter {
         self.insert_finished.store(true, Ordering::SeqCst);
     }
 
-    async fn spill_while_inserting(&mut self) -> Result<usize> {
+    async fn spill_while_inserting(&self) -> Result<usize> {
         info!(
             "{} spilling sort data of {} to disk while inserting ({} time(s) so far)",
             self.str_repr(),
@@ -112,7 +107,7 @@ impl ExternalSorter {
         );
 
         let partition = self.partition_id();
-        let in_mem_batches = self.in_mem_batches.get_mut().unwrap();
+        let mut in_mem_batches = self.in_mem_batches.lock().await;
         // we could always get a chance to free some memory as long as we are holding some
         if in_mem_batches.len() == 0 {
             return Ok(0);
@@ -122,7 +117,7 @@ impl ExternalSorter {
 
         let path = self.runtime.disk_manager.create_tmp_file()?;
         let stream = in_mem_merge_sort(
-            in_mem_batches,
+            &mut *in_mem_batches,
             self.schema.clone(),
             &*self.expr,
             self.runtime.batch_size(),
@@ -132,19 +127,19 @@ impl ExternalSorter {
 
         let total_size = spill(&mut stream?, path.clone(), self.schema.clone()).await?;
 
-        let mut spills = self.spills.lock().unwrap();
+        let mut spills = self.spills.lock().await;
         self.spilled_count.fetch_add(1, Ordering::SeqCst);
         self.spilled_bytes.fetch_add(total_size, Ordering::SeqCst);
         spills.push(path);
         Ok(total_size)
     }
 
-    pub(crate) fn insert_batch(&mut self, input: RecordBatch) -> Result<()> {
+    async fn insert_batch(&self, input: RecordBatch) -> Result<()> {
         let size = batch_memory_size(&input);
-        self.allocate(size)?;
+        self.allocate(size).await?;
         // sort each batch as it's inserted, more probably to be cache-resident
         let sorted_batch = sort_batch(input, self.schema.clone(), &*self.expr)?;
-        let mut in_mem_batches = self.in_mem_batches.lock().unwrap();
+        let mut in_mem_batches = self.in_mem_batches.lock().await;
         in_mem_batches.push(sorted_batch);
         Ok(())
     }
@@ -152,13 +147,13 @@ impl ExternalSorter {
     /// MergeSort in mem batches as well as spills into total order with `SortPreservingMergeStream`(SPMS).
     /// Always put in mem batch based stream to idx 0 in SPMS so that we could spill
     /// the stream when `spill()` is called on us.
-    async fn sort(&mut self) -> Result<()> {
+    async fn sort(&self) -> Result<SendableRecordBatchStream> {
         let partition = self.partition_id();
-        let in_mem_batches = self.in_mem_batches.get_mut().unwrap();
+        let mut in_mem_batches = self.in_mem_batches.lock().await;
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
         let mut streams: Vec<SpillableStream> = vec![];
         let in_mem_stream = in_mem_merge_sort(
-            in_mem_batches,
+            &mut *in_mem_batches,
             self.schema.clone(),
             &self.expr,
             self.runtime.batch_size(),
@@ -167,21 +162,26 @@ impl ExternalSorter {
         .await?;
         streams.push(SpillableStream::new_spillable(in_mem_stream));
 
-        let spills = self.spills.get_mut().unwrap();
+        let mut spills = self.spills.lock().await;
 
         for spill in spills.drain(..) {
             let stream = read_spill_as_stream(spill, self.schema.clone()).await?;
             streams.push(SpillableStream::new_unspillable(stream));
         }
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
-        self.output_streamer = Some(SortPreservingMergeStream::new_from_stream(
-            streams,
-            self.schema.clone(),
-            &self.expr,
-            self.runtime.batch_size(),
-            baseline_metrics,
-        ));
-        Ok(())
+
+        Ok(Box::pin(
+            SortPreservingMergeStream::new_from_stream(
+                streams,
+                self.schema.clone(),
+                &self.expr,
+                self.runtime.batch_size(),
+                baseline_metrics,
+                partition,
+                self.runtime.clone(),
+            )
+            .await,
+        ))
     }
 }
 
@@ -210,29 +210,9 @@ impl MemoryConsumer for ExternalSorter {
         self.runtime.memory_manager.clone()
     }
 
-    async fn spill(
-        &mut self,
-        _size: usize,
-        _trigger: &dyn MemoryConsumer,
-    ) -> Result<usize> {
+    async fn spill(&self, _size: usize, _trigger: &MemoryConsumerId) -> Result<usize> {
         if !self.insert_finished.load(Ordering::SeqCst) {
             let total_size = self.spill_while_inserting().await;
-            total_size
-        } else if !self.output_all_disk.load(Ordering::SeqCst)
-            && self.output_streamer.is_some()
-        {
-            info!(
-                "{} spilling in-mem sorter to disk while outputting",
-                self.str_repr()
-            );
-            let path = self.runtime.disk_manager.create_tmp_file()?;
-            let total_size = self
-                .output_streamer
-                .as_mut()
-                .unwrap()
-                .spill_underlying_stream(0, path)
-                .await;
-            self.output_all_disk.store(true, Ordering::SeqCst);
             total_size
         } else {
             Ok(0)
@@ -476,17 +456,7 @@ impl ExecutionPlan for ExternalSortExec {
         }
 
         let input = self.input.execute(partition).await?;
-        let mut stream = ExternalSortStream::new(
-            input,
-            partition,
-            self.expr.clone(),
-            RUNTIME_ENV.clone(),
-        );
-
-        stream.consume_input().await?;
-        stream.sorter.sort().await?;
-
-        Ok(Box::pin(stream))
+        external_sort(input, partition, self.expr.clone(), RUNTIME_ENV.clone()).await
     }
 
     fn fmt_as(
@@ -511,55 +481,28 @@ impl ExecutionPlan for ExternalSortExec {
     }
 }
 
-/// stream for sort plan
-struct ExternalSortStream {
-    schema: SchemaRef,
-    sorter: ExternalSorter,
-    input: SendableRecordBatchStream,
-}
+pub async fn external_sort(
+    mut input: SendableRecordBatchStream,
+    partition_id: usize,
+    expr: Vec<PhysicalSortExpr>,
+    runtime: Arc<RuntimeEnv>,
+) -> Result<SendableRecordBatchStream> {
+    let schema = input.schema();
+    let sorter = Arc::new(ExternalSorter::new(
+        partition_id,
+        schema.clone(),
+        expr,
+        runtime.clone(),
+    ));
+    runtime.register_consumer(sorter.clone()).await;
 
-impl ExternalSortStream {
-    fn new(
-        input: SendableRecordBatchStream,
-        partition_id: usize,
-        expr: Vec<PhysicalSortExpr>,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Self {
-        let schema = input.schema();
-        let sorter = ExternalSorter::new(partition_id, schema.clone(), expr, runtime);
-
-        Self {
-            schema: schema.clone(),
-            sorter,
-            input,
-        }
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        sorter.insert_batch(batch).await?;
     }
 
-    async fn consume_input(&mut self) -> Result<()> {
-        while let Some(batch) = self.input.next().await {
-            let batch = batch?;
-            self.sorter.insert_batch(batch)?;
-        }
-        self.sorter.finish_insert();
-        Ok(())
-    }
-}
-
-impl Stream for ExternalSortStream {
-    type Item = ArrowResult<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.get_mut().sorter.output_streamer {
-            None => Poll::Ready(None),
-            Some(ref mut stream) => Pin::new(stream).poll_next(cx),
-        }
-    }
-}
-
-impl RecordBatchStream for ExternalSortStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
+    sorter.finish_insert();
+    sorter.sort().await
 }
 
 #[cfg(test)]

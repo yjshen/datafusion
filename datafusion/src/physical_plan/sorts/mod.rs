@@ -204,24 +204,6 @@ struct RowIndex {
     row_idx: usize,
 }
 
-// pub struct SortKeyCursorWrapper<'a, 'b> {
-//     cursor: &'a SortKeyCursor,
-//     sort_options: &'b [SortOptions],
-// }
-//
-// impl<'a, 'b> SortKeyCursorWrapper<'a, 'b> {
-//     pub fn new(cursor: &'a SortKeyCursor, sort_options: &'b [SortOptions]) -> Self {
-//         Self {
-//             cursor,
-//             sort_options,
-//         }
-//     }
-//
-//     pub fn compare(&self, other: &Self) -> Result<Ordering> {
-//         self.cursor.compare(other.cursor, self.sort_options)
-//     }
-// }
-
 impl Ord for SortKeyCursor {
     fn cmp(&self, other: &Self) -> Ordering {
         other.compare(self).unwrap()

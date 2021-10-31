@@ -17,28 +17,31 @@
 
 //! Execution Memory Pool that guarantees a memory allocation strategy
 
-
 use crate::execution::memory_management::MemoryConsumerId;
+use async_trait::async_trait;
 use hashbrown::HashMap;
 use log::{info, warn};
 use std::cmp::min;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::sync::{Condvar, Mutex};
+use tokio::runtime::Handle;
+use tokio::sync::{Notify, RwLock};
 
+#[async_trait]
 pub(crate) trait ExecutionMemoryPool: Sync + Send + Debug {
     fn memory_available(&self) -> usize;
     fn memory_used(&self) -> usize;
     fn memory_used_partition(&self, partition_id: usize) -> usize;
-    fn acquire_memory(&self, required: usize, consumer: &MemoryConsumerId) -> usize;
-    fn update_usage(
+    async fn acquire_memory(&self, required: usize, consumer: &MemoryConsumerId)
+        -> usize;
+    async fn update_usage(
         &self,
         granted_size: usize,
         real_size: usize,
         consumer: &MemoryConsumerId,
     );
-    fn release_memory(&self, release_size: usize, partition_id: usize);
-    fn release_all(&self, partition_id: usize) -> usize;
+    async fn release_memory(&self, release_size: usize, partition_id: usize);
+    async fn release_all(&self, partition_id: usize) -> usize;
 }
 
 pub(crate) struct DummyExecutionMemoryPool {
@@ -61,6 +64,7 @@ impl Debug for DummyExecutionMemoryPool {
     }
 }
 
+#[async_trait]
 impl ExecutionMemoryPool for DummyExecutionMemoryPool {
     fn memory_available(&self) -> usize {
         usize::MAX
@@ -74,11 +78,15 @@ impl ExecutionMemoryPool for DummyExecutionMemoryPool {
         0
     }
 
-    fn acquire_memory(&self, required: usize, _consumer: &MemoryConsumerId) -> usize {
+    async fn acquire_memory(
+        &self,
+        required: usize,
+        _consumer: &MemoryConsumerId,
+    ) -> usize {
         required
     }
 
-    fn update_usage(
+    async fn update_usage(
         &self,
         _granted_size: usize,
         _real_size: usize,
@@ -86,9 +94,9 @@ impl ExecutionMemoryPool for DummyExecutionMemoryPool {
     ) {
     }
 
-    fn release_memory(&self, _release_size: usize, _partition_id: usize) {}
+    async fn release_memory(&self, _release_size: usize, _partition_id: usize) {}
 
-    fn release_all(&self, _partition_id: usize) -> usize {
+    async fn release_all(&self, _partition_id: usize) -> usize {
         usize::MAX
     }
 }
@@ -96,16 +104,16 @@ impl ExecutionMemoryPool for DummyExecutionMemoryPool {
 pub(crate) struct ConstraintExecutionMemoryPool {
     pool_size: usize,
     /// memory usage per partition
-    memory_usage: Mutex<HashMap<usize, usize>>,
-    condvar: Condvar,
+    memory_usage: RwLock<HashMap<usize, usize>>,
+    notify: Notify,
 }
 
 impl ConstraintExecutionMemoryPool {
     pub fn new(size: usize) -> Self {
         Self {
             pool_size: size,
-            memory_usage: Mutex::new(HashMap::new()),
-            condvar: Condvar::new(),
+            memory_usage: RwLock::new(HashMap::new()),
+            notify: Notify::new(),
         }
     }
 }
@@ -119,32 +127,40 @@ impl Debug for ConstraintExecutionMemoryPool {
     }
 }
 
+#[async_trait]
 impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
     fn memory_available(&self) -> usize {
         self.pool_size - self.memory_used()
     }
 
     fn memory_used(&self) -> usize {
-        let a = self.memory_usage.lock().unwrap();
-        a.values().sum()
+        Handle::current()
+            .block_on(async { self.memory_usage.read().await.values().sum() })
     }
 
     fn memory_used_partition(&self, partition_id: usize) -> usize {
-        let partition_usage = self.memory_usage.lock().unwrap();
-        match partition_usage.get(&partition_id) {
-            None => 0,
-            Some(v) => *v,
-        }
+        Handle::current().block_on(async {
+            let partition_usage = self.memory_usage.read().await;
+            match partition_usage.get(&partition_id) {
+                None => 0,
+                Some(v) => *v,
+            }
+        })
     }
 
-    fn acquire_memory(&self, required: usize, consumer: &MemoryConsumerId) -> usize {
+    async fn acquire_memory(
+        &self,
+        required: usize,
+        consumer: &MemoryConsumerId,
+    ) -> usize {
         assert!(required > 0);
         let partition_id = consumer.partition_id;
         {
-            let mut partition_usage = self.memory_usage.lock().unwrap();
+            let mut partition_usage = self.memory_usage.write().await;
             if !partition_usage.contains_key(&partition_id) {
                 partition_usage.entry(partition_id).or_insert(0);
-                self.condvar.notify_all();
+                // This will later cause waiting tasks to wake up and check numTasks again
+                self.notify.notify_waiters();
             }
         }
 
@@ -152,7 +168,7 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         // partition would have more than 1 / num_active_partition of the memory) or we have enough free
         // memory to give it (we always let each partition get at least 1 / (2 * num_active_partition)).
         loop {
-            let mut partition_usage = self.memory_usage.lock().unwrap();
+            let partition_usage = self.memory_usage.read().await;
             let num_active_partition = partition_usage.len();
             let current_mem = *partition_usage.get(&partition_id).unwrap();
 
@@ -178,15 +194,17 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
                     "{:?} waiting for at least 1/2N of pool to be free",
                     consumer
                 );
-                let _ = self.condvar.wait(partition_usage).unwrap();
+                let _ = self.notify.notified().await;
             } else {
+                drop(partition_usage);
+                let mut partition_usage = self.memory_usage.write().await;
                 *partition_usage.entry(partition_id).or_insert(0) += to_grant;
                 return to_grant;
             }
         }
     }
 
-    fn update_usage(
+    async fn update_usage(
         &self,
         granted_size: usize,
         real_size: usize,
@@ -197,7 +215,7 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         if granted_size == real_size {
             return;
         } else {
-            let mut partition_usage = self.memory_usage.lock().unwrap();
+            let mut partition_usage = self.memory_usage.write().await;
             if granted_size > real_size {
                 *partition_usage.entry(consumer.partition_id).or_insert(0) -=
                     granted_size - real_size;
@@ -210,8 +228,8 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
         }
     }
 
-    fn release_memory(&self, release_size: usize, partition_id: usize) {
-        let mut partition_usage = self.memory_usage.lock().unwrap();
+    async fn release_memory(&self, release_size: usize, partition_id: usize) {
+        let partition_usage = self.memory_usage.read().await;
         let current_mem = match partition_usage.get(&partition_id) {
             None => 0,
             Some(v) => *v,
@@ -227,25 +245,29 @@ impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
             release_size
         };
         if partition_usage.contains_key(&partition_id) {
+            drop(partition_usage);
+            let mut partition_usage = self.memory_usage.write().await;
             let entry = partition_usage.entry(partition_id).or_insert(0);
             *entry -= to_free;
             if *entry == 0 {
                 partition_usage.remove(&partition_id);
             }
         }
-        self.condvar.notify_all();
+        self.notify.notify_waiters();
     }
 
-    fn release_all(&self, partition_id: usize) -> usize {
-        let mut partition_usage = self.memory_usage.lock().unwrap();
+    async fn release_all(&self, partition_id: usize) -> usize {
+        let partition_usage = self.memory_usage.read().await;
         let mut current_mem = 0;
         match partition_usage.get(&partition_id) {
             None => return current_mem,
             Some(v) => current_mem = *v,
         }
 
+        drop(partition_usage);
+        let mut partition_usage = self.memory_usage.write().await;
         partition_usage.remove(&partition_id);
-        self.condvar.notify_all();
+        self.notify.notify_waiters();
         return current_mem;
     }
 }
