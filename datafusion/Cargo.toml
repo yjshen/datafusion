@@ -74,6 +74,7 @@ avro-rs = { version = "0.13", features = ["snappy"], optional = true }
 num-traits = { version = "0.2", optional = true }
 uuid = { version = "0.8", features = ["v4"] }
 tempfile = "3"
+dashmap = "4.0.2"
 
 [dev-dependencies]
 criterion = "0.3"

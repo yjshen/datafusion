@@ -17,7 +17,7 @@
 
 use crate::error::Result;
 use crate::execution::disk_manager::DiskManager;
-use crate::execution::memory_management::MemoryManager;
+use crate::execution::memory_management::{MemoryConsumer, MemoryManager};
 use std::sync::Arc;
 
 // Employ lazy static temporarily for RuntimeEnv, to avoid plumbing it through
@@ -51,6 +51,10 @@ impl RuntimeEnv {
 
     pub fn batch_size(&self) -> usize {
         self.config.batch_size
+    }
+
+    pub async fn register_consumer(&self, memory_consumer: Arc<dyn MemoryConsumer>) {
+        self.memory_manager.register_consumer(memory_consumer).await;
     }
 }
 
