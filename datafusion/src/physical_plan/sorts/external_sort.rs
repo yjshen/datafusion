@@ -210,7 +210,11 @@ impl MemoryConsumer for ExternalSorter {
         self.runtime.memory_manager.clone()
     }
 
-    async fn spill(&self, _size: usize, _trigger: &MemoryConsumerId) -> Result<usize> {
+    async fn spill_inner(
+        &self,
+        _size: usize,
+        _trigger: &MemoryConsumerId,
+    ) -> Result<usize> {
         if !self.insert_finished.load(Ordering::SeqCst) {
             let total_size = self.spill_while_inserting().await;
             total_size
@@ -231,8 +235,16 @@ impl MemoryConsumer for ExternalSorter {
         self.spilled_bytes.load(Ordering::SeqCst)
     }
 
+    fn spilled_bytes_add(&self, add: usize) {
+        self.spilled_bytes.fetch_add(add, Ordering::SeqCst);
+    }
+
     fn spilled_count(&self) -> usize {
         self.spilled_count.load(Ordering::SeqCst)
+    }
+
+    fn spilled_count_increment(&self) {
+        self.spilled_count.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -481,6 +493,7 @@ impl ExecutionPlan for ExternalSortExec {
     }
 }
 
+/// Sort based on `ExternalSorter`
 pub async fn external_sort(
     mut input: SendableRecordBatchStream,
     partition_id: usize,

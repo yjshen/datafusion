@@ -103,6 +103,10 @@ impl MemoryManager {
             .await
     }
 
+    /// Revise pool usage while handling variable length data structure.
+    /// In this case, we may estimate and allocate in advance, and revise the usage
+    /// after the construction of the data structure.
+    #[allow(dead_code)]
     pub(crate) async fn update_exec_pool_usage(
         &self,
         granted_size: usize,
@@ -114,6 +118,8 @@ impl MemoryManager {
             .await
     }
 
+    /// Called during the shutdown procedure of a partition, for memory reclamation.
+    #[allow(dead_code)]
     pub(crate) async fn release_all_exec_pool_for_partition(
         &self,
         partition_id: usize,
@@ -121,6 +127,7 @@ impl MemoryManager {
         self.execution_pool.release_all(partition_id).await
     }
 
+    #[allow(dead_code)]
     pub(crate) fn exec_memory_used(&self) -> usize {
         self.execution_pool.memory_used()
     }
@@ -159,6 +166,8 @@ impl PartitionMemoryManager {
         consumers.insert(id, consumer);
     }
 
+    /// Try to acquire `required` of execution memory for the consumer and return the number of bytes
+    /// obtained, or return OutOfMemoryError if no enough memory avaiable even after possible spills.
     pub async fn acquire_exec_memory(
         &self,
         required: usize,
@@ -194,7 +203,7 @@ impl PartitionMemoryManager {
                         "Partition {} released {} from consumer {}",
                         self.partition_id,
                         released,
-                        c.id()
+                        c.str_repr()
                     );
                     got += memory_manager
                         .acquire_exec_pool_memory(required - got, consumer_id)
@@ -213,7 +222,9 @@ impl PartitionMemoryManager {
             if released > 0 {
                 debug!(
                     "Partition {} released {} from consumer itself {}",
-                    self.partition_id, released, consumer_id
+                    self.partition_id,
+                    released,
+                    consumer.str_repr()
                 );
                 got += memory_manager
                     .acquire_exec_pool_memory(required - got, consumer_id)
@@ -232,17 +243,18 @@ impl PartitionMemoryManager {
         Ok(got)
     }
 
+    /// log current memory usage for all consumers in this partition
     pub async fn show_memory_usage(&self) -> Result<()> {
         info!("Memory usage for partition {}", self.partition_id);
         let consumers = self.consumers.lock().await;
         let mut used = 0;
-        for (id, c) in consumers.iter() {
+        for (_, c) in consumers.iter() {
             let cur_used = c.get_used();
             used += cur_used;
             if cur_used > 0 {
                 info!(
                     "Consumer {} acquired {}",
-                    id,
+                    c.str_repr(),
                     human_readable_size(cur_used as usize)
                 )
             }
@@ -265,12 +277,16 @@ impl PartitionMemoryManager {
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
+/// Id that uniquely identifies a Memory Consumer
 pub struct MemoryConsumerId {
+    /// partition the consumer belongs to
     pub partition_id: usize,
+    /// unique id
     pub id: usize,
 }
 
 impl MemoryConsumerId {
+    /// Auto incremented new Id
     pub fn new(partition_id: usize) -> Self {
         let id = next_id();
         Self { partition_id, id }
@@ -284,17 +300,22 @@ impl Display for MemoryConsumerId {
 }
 
 #[async_trait]
+/// A memory consumer that supports spilling.
 pub trait MemoryConsumer: Send + Sync + Debug {
     /// Display name of the consumer
     fn name(&self) -> String;
+
     /// Unique id of the consumer
     fn id(&self) -> &MemoryConsumerId;
 
+    /// Ptr to MemoryManager
     fn memory_manager(&self) -> Arc<MemoryManager>;
+
     /// partition that the consumer belongs to
     fn partition_id(&self) -> usize {
         self.id().partition_id
     }
+
     /// Try allocate `required` bytes as needed
     async fn allocate(&self, required: usize) -> Result<()> {
         let got = self
@@ -304,22 +325,50 @@ pub trait MemoryConsumer: Send + Sync + Debug {
         self.update_used(got as isize);
         Ok(())
     }
+
+    /// Spill at least `size` bytes to disk and update related counters
+    async fn spill(&self, size: usize, trigger: &MemoryConsumerId) -> Result<usize> {
+        let released = self.spill_inner(size, trigger).await?;
+        if released > 0 {
+            self.memory_manager()
+                .release_exec_pool_memory(released, self.id().partition_id)
+                .await;
+            self.update_used(-(released as isize));
+            self.spilled_bytes_add(released);
+            self.spilled_count_increment();
+        }
+        Ok(released)
+    }
+
     /// Spill at least `size` bytes to disk and frees memory
-    async fn spill(&self, size: usize, trigger: &MemoryConsumerId) -> Result<usize>;
+    async fn spill_inner(&self, size: usize, trigger: &MemoryConsumerId)
+        -> Result<usize>;
+
     /// Get current memory usage for the consumer itself
     fn get_used(&self) -> isize;
 
+    /// Update memory usage
     fn update_used(&self, delta: isize);
+
     /// Get total number of spilled bytes so far
     fn spilled_bytes(&self) -> usize;
+
+    /// Update spilled bytes counter
+    fn spilled_bytes_add(&self, add: usize);
+
     /// Get total number of triggered spills so far
     fn spilled_count(&self) -> usize;
 
+    /// Update spilled count
+    fn spilled_count_increment(&self);
+
+    /// String representation for the consumer
     fn str_repr(&self) -> String {
         format!("{}({})", self.name(), self.id())
     }
 
     #[inline]
+    /// log during spilling
     fn log_spill(&self, size: usize) {
         info!(
             "{} spilling of {} bytes to disk ({} times so far)",
