@@ -293,7 +293,11 @@ impl MemoryConsumer for MergingStreams {
         self.runtime.memory_manager.clone()
     }
 
-    async fn spill(&self, _size: usize, _trigger: &MemoryConsumerId) -> Result<usize> {
+    async fn spill_inner(
+        &self,
+        _size: usize,
+        _trigger: &MemoryConsumerId,
+    ) -> Result<usize> {
         let path = self.runtime.disk_manager.create_tmp_file()?;
         self.spill_underlying_stream(0, path).await
     }
@@ -310,7 +314,15 @@ impl MemoryConsumer for MergingStreams {
         todo!()
     }
 
+    fn spilled_bytes_add(&self, _add: usize) {
+        todo!()
+    }
+
     fn spilled_count(&self) -> usize {
+        todo!()
+    }
+
+    fn spilled_count_increment(&self) {
         todo!()
     }
 }
@@ -700,12 +712,11 @@ mod tests {
     use crate::physical_plan::csv::CsvExec;
     use crate::physical_plan::expressions::col;
     use crate::physical_plan::memory::MemoryExec;
-    use crate::physical_plan::sort::SortExec;
+    use crate::physical_plan::sorts::sort::SortExec;
     use crate::physical_plan::{collect, common};
     use crate::test;
 
     use super::*;
-    use crate::physical_plan::sorts::sort::SortExec;
     use futures::SinkExt;
     use tokio_stream::StreamExt;
 

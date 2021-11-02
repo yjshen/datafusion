@@ -185,6 +185,7 @@ impl ExecutionPlan for SortExec {
     }
 }
 
+/// Sort the record batch based on `expr` and reorder based on sort result.
 pub fn sort_batch(
     batch: RecordBatch,
     schema: SchemaRef,

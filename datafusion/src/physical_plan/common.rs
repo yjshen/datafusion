@@ -229,15 +229,22 @@ pub fn compute_record_batch_statistics(
     }
 }
 
+/// Write in Arrow IPC format.
 pub struct IPCWriterWrapper {
+    /// path
     pub path: String,
+    /// Inner writer
     pub writer: FileWriter<BufWriter<File>>,
+    /// bathes written
     pub num_batches: u64,
+    /// rows written
     pub num_rows: u64,
+    /// bytes written
     pub num_bytes: u64,
 }
 
 impl IPCWriterWrapper {
+    /// Create new writer
     pub fn new(path: &str, schema: &Schema) -> Result<Self> {
         let file = File::create(path).map_err(|e| DataFusionError::IoError(e))?;
         let buffer_writer = std::io::BufWriter::new(file);
@@ -250,6 +257,7 @@ impl IPCWriterWrapper {
         })
     }
 
+    /// Write one single batch
     pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         self.writer.write(batch)?;
         self.num_batches += 1;
@@ -259,15 +267,18 @@ impl IPCWriterWrapper {
         Ok(())
     }
 
+    /// Finish the writer
     pub fn finish(&mut self) -> Result<()> {
         self.writer.finish().map_err(DataFusionError::ArrowError)
     }
 
+    /// Path write to
     pub fn path(&self) -> &str {
         &self.path
     }
 }
 
+/// Estimate batch memory footprint
 pub fn batch_memory_size(rb: &RecordBatch) -> usize {
     rb.columns()
         .iter()

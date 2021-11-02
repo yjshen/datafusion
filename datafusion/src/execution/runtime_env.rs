@@ -15,14 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! Execution runtime environment that tracks memory, disk and various configurations
+//! that are used during physical plan execution.
+
 use crate::error::Result;
 use crate::execution::disk_manager::DiskManager;
 use crate::execution::memory_management::{MemoryConsumer, MemoryManager};
 use std::sync::Arc;
 
-// Employ lazy static temporarily for RuntimeEnv, to avoid plumbing it through
-// all `async fn execute(&self, partition: usize, runtime: Arc<RuntimeEnv>)`
 lazy_static! {
+    /// Employ lazy static temporarily for RuntimeEnv, to avoid plumbing it through
+    /// all `async fn execute(&self, partition: usize, runtime: Arc<RuntimeEnv>)`
     pub static ref RUNTIME_ENV: Arc<RuntimeEnv> = {
         let config = RuntimeConfig::new();
         Arc::new(RuntimeEnv::new(config).unwrap())
@@ -30,7 +33,9 @@ lazy_static! {
 }
 
 #[derive(Clone)]
+/// Execution runtime environment
 pub struct RuntimeEnv {
+    /// Runtime configuration
     pub config: RuntimeConfig,
     /// Runtime memory management
     pub memory_manager: Arc<MemoryManager>,
@@ -39,6 +44,7 @@ pub struct RuntimeEnv {
 }
 
 impl RuntimeEnv {
+    /// Create env based on configuration
     pub fn new(config: RuntimeConfig) -> Result<Self> {
         let memory_manager = Arc::new(MemoryManager::new(config.max_memory));
         let disk_manager = Arc::new(DiskManager::new(&config.local_dirs)?);
@@ -49,16 +55,19 @@ impl RuntimeEnv {
         })
     }
 
+    /// Get execution batch size based on config
     pub fn batch_size(&self) -> usize {
         self.config.batch_size
     }
 
+    /// Register the consumer to get it tracked
     pub async fn register_consumer(&self, memory_consumer: Arc<dyn MemoryConsumer>) {
         self.memory_manager.register_consumer(memory_consumer).await;
     }
 }
 
 #[derive(Clone)]
+/// Execution runtime configuration
 pub struct RuntimeConfig {
     /// Default batch size when creating new batches
     pub batch_size: usize,
@@ -69,6 +78,7 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// New with default values
     pub fn new() -> Self {
         Default::default()
     }
