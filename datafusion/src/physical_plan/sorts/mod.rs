@@ -174,6 +174,7 @@ impl SortKeyCursor {
     ) -> Result<()> {
         let hm = self.batch_comparators.read().unwrap();
         if !hm.contains_key(&other.batch_idx) {
+            drop(hm);
             let mut map = self.batch_comparators.write().unwrap();
             let cmp = map
                 .borrow_mut()

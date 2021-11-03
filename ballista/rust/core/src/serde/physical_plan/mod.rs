@@ -36,7 +36,7 @@ mod roundtrip_tests {
             hash_aggregate::{AggregateMode, HashAggregateExec},
             hash_join::{HashJoinExec, PartitionMode},
             limit::{GlobalLimitExec, LocalLimitExec},
-            sort::SortExec,
+            sorts::sort::SortExec,
             AggregateExpr, ColumnarValue, Distribution, ExecutionPlan, Partitioning,
             PhysicalExpr,
         },

@@ -89,7 +89,7 @@ impl InMemSortStream {
                     Err(e) => return Err(e),
                 };
                 min_heap.push(cursor);
-                cursors[idx] = batch;
+                cursors.insert(idx, batch);
                 Ok(())
             })?;
 
