@@ -1275,7 +1275,10 @@ mod tests {
             sort.as_slice(),
             1024,
             baseline_metrics,
-        );
+            0,
+            RUNTIME_ENV.clone(),
+        )
+        .await;
 
         let mut merged = common::collect(Box::pin(merge_stream)).await.unwrap();
 

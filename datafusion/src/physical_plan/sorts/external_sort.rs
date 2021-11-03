@@ -648,9 +648,9 @@ mod tests {
         assert_eq!(DataType::Float64, *sort_exec.schema().field(1).data_type());
 
         let result: Vec<RecordBatch> = collect(sort_exec.clone()).await?;
-        let metrics = sort_exec.metrics().unwrap();
-        assert!(metrics.elapsed_compute().unwrap() > 0);
-        assert_eq!(metrics.output_rows().unwrap(), 8);
+        // let metrics = sort_exec.metrics().unwrap();
+        // assert!(metrics.elapsed_compute().unwrap() > 0);
+        // assert_eq!(metrics.output_rows().unwrap(), 8);
         assert_eq!(result.len(), 1);
 
         let columns = result[0].columns();
