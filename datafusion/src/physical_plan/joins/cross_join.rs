@@ -18,32 +18,30 @@
 //! Defines the cross join plan for loading the left side of the cross join
 //! and producing batches in parallel for the right partitions
 
-use futures::{lock::Mutex, StreamExt};
+use std::time::Instant;
 use std::{any::Any, sync::Arc, task::Poll};
 
-use crate::physical_plan::memory::MemoryStream;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
-
+use async_trait::async_trait;
+use futures::{lock::Mutex, StreamExt};
 use futures::{Stream, TryStreamExt};
+use log::debug;
 
-use super::{
-    coalesce_partitions::CoalescePartitionsExec, hash_utils::check_join_is_valid,
-    ColumnStatistics, Statistics,
+use crate::physical_plan::joins::check_join_is_valid;
+use crate::physical_plan::memory::MemoryStream;
+use crate::physical_plan::{
+    coalesce_batches::concat_batches, DisplayFormatType, ExecutionPlan, Partitioning,
+    RecordBatchStream, SendableRecordBatchStream,
+};
+use crate::physical_plan::{
+    coalesce_partitions::CoalescePartitionsExec, ColumnStatistics, Statistics,
 };
 use crate::{
     error::{DataFusionError, Result},
     scalar::ScalarValue,
 };
-use async_trait::async_trait;
-use std::time::Instant;
-
-use super::{
-    coalesce_batches::concat_batches, DisplayFormatType, ExecutionPlan, Partitioning,
-    RecordBatchStream, SendableRecordBatchStream,
-};
-use log::debug;
 
 /// Data of the left side
 type JoinLeftData = RecordBatch;

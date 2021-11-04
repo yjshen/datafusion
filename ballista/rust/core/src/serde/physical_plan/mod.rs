@@ -22,6 +22,7 @@ pub mod to_proto;
 mod roundtrip_tests {
     use std::{convert::TryInto, sync::Arc};
 
+    use datafusion::physical_plan::joins::hash_join::{HashJoinExec, PartitionMode};
     use datafusion::{
         arrow::{
             compute::sort::SortOptions,
@@ -34,7 +35,6 @@ mod roundtrip_tests {
             expressions::{Avg, Column, PhysicalSortExpr},
             filter::FilterExec,
             hash_aggregate::{AggregateMode, HashAggregateExec},
-            hash_join::{HashJoinExec, PartitionMode},
             limit::{GlobalLimitExec, LocalLimitExec},
             sorts::sort::SortExec,
             AggregateExpr, ColumnarValue, Distribution, ExecutionPlan, Partitioning,
@@ -43,9 +43,10 @@ mod roundtrip_tests {
         scalar::ScalarValue,
     };
 
+    use crate::execution_plans::ShuffleWriterExec;
+
     use super::super::super::error::Result;
     use super::super::protobuf;
-    use crate::execution_plans::ShuffleWriterExec;
 
     fn roundtrip_test(exec_plan: Arc<dyn ExecutionPlan>) -> Result<()> {
         let proto: protobuf::PhysicalPlanNode = exec_plan.clone().try_into()?;

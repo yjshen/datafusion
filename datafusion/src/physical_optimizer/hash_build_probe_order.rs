@@ -20,17 +20,17 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 
+use crate::error::Result;
 use crate::execution::context::ExecutionConfig;
 use crate::logical_plan::JoinType;
-use crate::physical_plan::cross_join::CrossJoinExec;
 use crate::physical_plan::expressions::Column;
-use crate::physical_plan::hash_join::HashJoinExec;
+use crate::physical_plan::joins::cross_join::CrossJoinExec;
+use crate::physical_plan::joins::hash_join::HashJoinExec;
 use crate::physical_plan::projection::ProjectionExec;
 use crate::physical_plan::{ExecutionPlan, PhysicalExpr};
 
 use super::optimizer::PhysicalOptimizerRule;
 use super::utils::optimize_children;
-use crate::error::Result;
 
 /// BuildProbeOrder reorders the build and probe phase of
 /// hash joins. This uses the amount of rows that a datasource has.
@@ -153,15 +153,14 @@ impl PhysicalOptimizerRule for HashBuildProbeOrder {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        physical_plan::{hash_join::PartitionMode, Statistics},
-        test::exec::StatisticsExec,
-    };
-
-    use super::*;
     use std::sync::Arc;
 
     use arrow::datatypes::{DataType, Field, Schema};
+
+    use crate::physical_plan::joins::hash_join::PartitionMode;
+    use crate::{physical_plan::Statistics, test::exec::StatisticsExec};
+
+    use super::*;
 
     fn create_big_and_small() -> (Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>) {
         let big = Arc::new(StatisticsExec::new(

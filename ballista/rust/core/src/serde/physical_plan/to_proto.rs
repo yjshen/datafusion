@@ -28,7 +28,6 @@ use std::{
 
 use datafusion::logical_plan::JoinType;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
-use datafusion::physical_plan::cross_join::CrossJoinExec;
 use datafusion::physical_plan::csv::CsvExec;
 use datafusion::physical_plan::expressions::{
     CaseExpr, InListExpr, IsNotNullExpr, IsNullExpr, NegativeExpr, NotExpr,
@@ -36,7 +35,8 @@ use datafusion::physical_plan::expressions::{
 use datafusion::physical_plan::expressions::{CastExpr, TryCastExpr};
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::hash_aggregate::AggregateMode;
-use datafusion::physical_plan::hash_join::{HashJoinExec, PartitionMode};
+use datafusion::physical_plan::joins::cross_join::CrossJoinExec;
+use datafusion::physical_plan::joins::hash_join::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::parquet::{ParquetExec, ParquetPartition};
 use datafusion::physical_plan::projection::ProjectionExec;

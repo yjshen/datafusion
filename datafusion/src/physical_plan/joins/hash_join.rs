@@ -18,46 +18,39 @@
 //! Defines the join plan for executing partitions in parallel and then joining the results
 //! into a set of partitions.
 
-use ahash::RandomState;
-
-use smallvec::{smallvec, SmallVec};
+use std::fmt;
 use std::sync::Arc;
 use std::{any::Any, usize};
 use std::{time::Instant, vec};
 
-use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryStreamExt};
-use tokio::sync::Mutex;
-
+use ahash::RandomState;
+use arrow::compute::take;
 use arrow::datatypes::*;
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
 use arrow::{array::*, buffer::MutableBuffer};
-
-use arrow::compute::take;
-
+use async_trait::async_trait;
+use futures::{Stream, StreamExt, TryStreamExt};
 use hashbrown::raw::RawTable;
+use log::debug;
+use smallvec::{smallvec, SmallVec};
+use tokio::sync::Mutex;
 
-use super::{
-    coalesce_partitions::CoalescePartitionsExec,
-    hash_utils::{build_join_schema, check_join_is_valid, JoinOn},
-};
-use super::{
+use crate::error::{DataFusionError, Result};
+use crate::logical_plan::JoinType;
+use crate::physical_plan::coalesce_batches::concat_batches;
+use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use crate::physical_plan::joins::{build_join_schema, check_join_is_valid, JoinOn};
+use crate::physical_plan::PhysicalExpr;
+use crate::physical_plan::{
     expressions::Column,
     metrics::{self, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet},
 };
-use super::{hash_utils::create_hashes, Statistics};
-use crate::error::{DataFusionError, Result};
-use crate::logical_plan::JoinType;
-
-use super::{
+use crate::physical_plan::{hash_utils::create_hashes, Statistics};
+use crate::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use crate::physical_plan::coalesce_batches::concat_batches;
-use crate::physical_plan::PhysicalExpr;
-use log::debug;
-use std::fmt;
 
 type StringArray = Utf8Array<i32>;
 type LargeStringArray = Utf8Array<i64>;
@@ -964,6 +957,8 @@ impl Stream for HashJoinStream {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::{
         assert_batches_sorted_eq,
         physical_plan::{
@@ -973,7 +968,6 @@ mod tests {
     };
 
     use super::*;
-    use std::sync::Arc;
 
     fn build_table(
         a: (&str, &Vec<i32>),

@@ -17,11 +17,15 @@
 
 //! Physical query planner
 
-use super::analyze::AnalyzeExec;
-use super::{
-    aggregates, empty::EmptyExec, expressions::binary, functions,
-    hash_join::PartitionMode, udaf, union::UnionExec, windows,
-};
+use std::sync::Arc;
+
+use arrow::compute::cast::can_cast_types;
+use arrow::compute::sort::SortOptions;
+use arrow::datatypes::*;
+use log::debug;
+
+use expressions::col;
+
 use crate::execution::context::ExecutionContextState;
 use crate::logical_plan::{
     unnormalize_cols, DFSchema, Expr, LogicalPlan, Operator,
@@ -29,20 +33,21 @@ use crate::logical_plan::{
     UserDefinedLogicalNode,
 };
 use crate::physical_optimizer::optimizer::PhysicalOptimizerRule;
-use crate::physical_plan::cross_join::CrossJoinExec;
 use crate::physical_plan::explain::ExplainExec;
 use crate::physical_plan::expressions;
 use crate::physical_plan::expressions::{CaseExpr, Column, Literal, PhysicalSortExpr};
 use crate::physical_plan::filter::FilterExec;
 use crate::physical_plan::hash_aggregate::{AggregateMode, HashAggregateExec};
-use crate::physical_plan::hash_join::HashJoinExec;
+use crate::physical_plan::joins::cross_join::CrossJoinExec;
+use crate::physical_plan::joins::hash_join::HashJoinExec;
+use crate::physical_plan::joins::hash_join::PartitionMode;
 use crate::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use crate::physical_plan::projection::ProjectionExec;
 use crate::physical_plan::repartition::RepartitionExec;
 use crate::physical_plan::sorts::sort::SortExec;
 use crate::physical_plan::udf;
 use crate::physical_plan::windows::WindowAggExec;
-use crate::physical_plan::{hash_utils, Partitioning};
+use crate::physical_plan::{hash_utils, joins, Partitioning};
 use crate::physical_plan::{AggregateExpr, ExecutionPlan, PhysicalExpr, WindowExpr};
 use crate::scalar::ScalarValue;
 use crate::sql::utils::{generate_sort_key, window_expr_common_partition_keys};
@@ -52,12 +57,11 @@ use crate::{
     physical_plan::displayable,
 };
 
-use arrow::compute::cast::can_cast_types;
-use arrow::compute::sort::SortOptions;
-use arrow::datatypes::*;
-use expressions::col;
-use log::debug;
-use std::sync::Arc;
+use super::analyze::AnalyzeExec;
+use super::{
+    aggregates, empty::EmptyExec, expressions::binary, functions, udaf, union::UnionExec,
+    windows,
+};
 
 fn create_function_physical_name(
     fun: &str,
@@ -677,7 +681,7 @@ impl DefaultPhysicalPlanner {
                             Column::new(&r.name, right_df_schema.index_of_column(r)?),
                         ))
                     })
-                    .collect::<Result<hash_utils::JoinOn>>()?;
+                    .collect::<Result<joins::JoinOn>>()?;
 
                 if ctx_state.config.target_partitions > 1
                     && ctx_state.config.repartition_joins
@@ -1392,7 +1396,13 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use fmt::Debug;
+    use std::convert::TryFrom;
+    use std::{any::Any, fmt};
+
+    use arrow::datatypes::{DataType, Field};
+    use async_trait::async_trait;
+
     use crate::logical_plan::{DFField, DFSchema, DFSchemaRef};
     use crate::physical_plan::{
         csv::CsvReadOptions, expressions, DisplayFormatType, Partitioning, Statistics,
@@ -1402,11 +1412,8 @@ mod tests {
         logical_plan::{col, lit, sum, LogicalPlanBuilder},
         physical_plan::SendableRecordBatchStream,
     };
-    use arrow::datatypes::{DataType, Field};
-    use async_trait::async_trait;
-    use fmt::Debug;
-    use std::convert::TryFrom;
-    use std::{any::Any, fmt};
+
+    use super::*;
 
     fn make_ctx_state() -> ExecutionContextState {
         ExecutionContextState::new()

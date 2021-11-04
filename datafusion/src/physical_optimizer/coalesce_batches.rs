@@ -18,15 +18,18 @@
 //! CoalesceBatches optimizer that groups batches together rows
 //! in bigger batches to avoid overhead with small batches
 
-use super::optimizer::PhysicalOptimizerRule;
+use std::sync::Arc;
+
+use crate::physical_plan::joins::hash_join::HashJoinExec;
 use crate::{
     error::Result,
     physical_plan::{
         coalesce_batches::CoalesceBatchesExec, filter::FilterExec,
-        hash_join::HashJoinExec, repartition::RepartitionExec,
+        repartition::RepartitionExec,
     },
 };
-use std::sync::Arc;
+
+use super::optimizer::PhysicalOptimizerRule;
 
 /// Optimizer that introduces CoalesceBatchesExec to avoid overhead with small batches
 pub struct CoalesceBatches {}

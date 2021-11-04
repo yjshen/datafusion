@@ -21,15 +21,8 @@ use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 
-use crate::error::BallistaError;
-use crate::execution_plans::{
-    ShuffleReaderExec, ShuffleWriterExec, UnresolvedShuffleExec,
-};
-use crate::serde::protobuf::repartition_exec_node::PartitionMethod;
-use crate::serde::protobuf::ShuffleReaderPartition;
-use crate::serde::scheduler::PartitionLocation;
-use crate::serde::{from_proto_binary_op, proto_error, protobuf};
-use crate::{convert_box_required, convert_required, into_required};
+use log::debug;
+
 use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datafusion::catalog::catalog::{
     CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider,
@@ -46,7 +39,8 @@ use datafusion::physical_plan::aggregates::{create_aggregate_expr, AggregateFunc
 use datafusion::physical_plan::avro::{AvroExec, AvroReadOptions};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::hash_aggregate::{AggregateMode, HashAggregateExec};
-use datafusion::physical_plan::hash_join::PartitionMode;
+use datafusion::physical_plan::joins::cross_join::CrossJoinExec;
+use datafusion::physical_plan::joins::hash_join::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::parquet::ParquetPartition;
 use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
@@ -56,7 +50,6 @@ use datafusion::physical_plan::window_functions::{
 use datafusion::physical_plan::windows::{create_window_expr, WindowAggExec};
 use datafusion::physical_plan::{
     coalesce_batches::CoalesceBatchesExec,
-    cross_join::CrossJoinExec,
     csv::CsvExec,
     empty::EmptyExec,
     expressions::{
@@ -65,7 +58,6 @@ use datafusion::physical_plan::{
     },
     filter::FilterExec,
     functions::{self, BuiltinScalarFunction, ScalarFunctionExpr},
-    hash_join::HashJoinExec,
     limit::{GlobalLimitExec, LocalLimitExec},
     parquet::ParquetExec,
     projection::ProjectionExec,
@@ -78,9 +70,18 @@ use datafusion::physical_plan::{
     AggregateExpr, ExecutionPlan, PhysicalExpr, Statistics, WindowExpr,
 };
 use datafusion::prelude::CsvReadOptions;
-use log::debug;
 use protobuf::physical_expr_node::ExprType;
 use protobuf::physical_plan_node::PhysicalPlanType;
+
+use crate::error::BallistaError;
+use crate::execution_plans::{
+    ShuffleReaderExec, ShuffleWriterExec, UnresolvedShuffleExec,
+};
+use crate::serde::protobuf::repartition_exec_node::PartitionMethod;
+use crate::serde::protobuf::ShuffleReaderPartition;
+use crate::serde::scheduler::PartitionLocation;
+use crate::serde::{from_proto_binary_op, proto_error, protobuf};
+use crate::{convert_box_required, convert_required, into_required};
 
 impl TryInto<Arc<dyn ExecutionPlan>> for &protobuf::PhysicalPlanNode {
     type Error = BallistaError;

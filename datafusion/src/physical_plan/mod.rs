@@ -17,16 +17,13 @@
 
 //! Traits for physical query plan, supporting parallel execution for partitioned relations.
 
-pub use self::metrics::Metric;
-use self::metrics::MetricsSet;
-use self::{
-    coalesce_partitions::CoalescePartitionsExec, display::DisplayableExecutionPlan,
-};
-use crate::physical_plan::expressions::{PhysicalSortExpr, SortColumn};
-use crate::{
-    error::{DataFusionError, Result},
-    scalar::ScalarValue,
-};
+use std::fmt;
+use std::fmt::{Debug, Display};
+use std::ops::Range;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::{any::Any, pin::Pin};
+
 use arrow::array::ArrayRef;
 use arrow::compute::merge_sort::SortOptions;
 use arrow::compute::partition::lexicographical_partition_ranges;
@@ -34,14 +31,23 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-pub use display::DisplayFormatType;
 use futures::stream::Stream;
-use std::fmt;
-use std::fmt::{Debug, Display};
-use std::ops::Range;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::{any::Any, pin::Pin};
+
+pub use display::DisplayFormatType;
+
+use crate::physical_plan::expressions::{PhysicalSortExpr, SortColumn};
+use crate::{
+    error::{DataFusionError, Result},
+    scalar::ScalarValue,
+};
+
+pub use self::metrics::Metric;
+use self::metrics::MetricsSet;
+/// Physical planner interface
+pub use self::planner::PhysicalPlanner;
+use self::{
+    coalesce_partitions::CoalescePartitionsExec, display::DisplayableExecutionPlan,
+};
 
 /// Trait for types that stream [arrow::record_batch::RecordBatch]
 pub trait RecordBatchStream: Stream<Item = ArrowResult<RecordBatch>> {
@@ -85,9 +91,6 @@ impl Stream for EmptyRecordBatchStream {
         Poll::Ready(None)
     }
 }
-
-/// Physical planner interface
-pub use self::planner::PhysicalPlanner;
 
 /// Statistics for a physical plan node
 /// Fields are optional and can be inexact because the sources
@@ -612,7 +615,6 @@ pub mod avro;
 pub mod coalesce_batches;
 pub mod coalesce_partitions;
 pub mod common;
-pub mod cross_join;
 #[cfg(feature = "crypto_expressions")]
 pub mod crypto_expressions;
 pub mod csv;
@@ -625,8 +627,8 @@ pub mod expressions;
 pub mod filter;
 pub mod functions;
 pub mod hash_aggregate;
-pub mod hash_join;
 pub mod hash_utils;
+pub mod joins;
 pub mod json;
 pub mod limit;
 pub mod math_expressions;
