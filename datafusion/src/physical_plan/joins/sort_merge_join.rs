@@ -1,4 +1,3 @@
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,24 +23,25 @@ use std::sync::Arc;
 use std::{any::Any, usize};
 use std::{time::Instant, vec};
 
-use ahash::RandomState;
 use arrow::compute::take;
 use arrow::datatypes::*;
-use arrow::error::Result as ArrowResult;
+use arrow::error::{ArrowError, Result as ArrowResult};
 use arrow::record_batch::RecordBatch;
 use arrow::{array::*, buffer::MutableBuffer};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
-use hashbrown::raw::RawTable;
 use log::debug;
 use smallvec::{smallvec, SmallVec};
 use tokio::sync::Mutex;
 
 use crate::error::{DataFusionError, Result};
+use crate::execution::runtime_env::RuntimeEnv;
 use crate::logical_plan::JoinType;
 use crate::physical_plan::coalesce_batches::concat_batches;
 use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use crate::physical_plan::expressions::{exprs_to_sort_columns, PhysicalSortExpr};
 use crate::physical_plan::joins::{build_join_schema, check_join_is_valid, JoinOn};
+use crate::physical_plan::stream::RecordBatchReceiverStream;
 use crate::physical_plan::PhysicalExpr;
 use crate::physical_plan::{
     expressions::Column,
@@ -52,9 +52,531 @@ use crate::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
     SendableRecordBatchStream,
 };
+use arrow::array::growable::GrowablePrimitive;
+use arrow::compute::partition::lexicographical_partition_ranges;
+use arrow::compute::sort::SortOptions;
+use std::cmp::Ordering;
+use std::collections::VecDeque;
+use std::ops::Range;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::sync::mpsc::{Receiver, Sender};
 
 type StringArray = Utf8Array<i32>;
 type LargeStringArray = Utf8Array<i64>;
+
+#[derive(Clone)]
+struct PartitionedRecordBatch {
+    batch: RecordBatch,
+    ranges: Vec<Range<usize>>,
+}
+
+impl PartitionedRecordBatch {
+    fn new(
+        batch: Option<RecordBatch>,
+        expr: &[PhysicalSortExpr],
+    ) -> Result<Option<Self>> {
+        match batch {
+            Some(batch) => {
+                let columns = exprs_to_sort_columns(&batch, expr)?;
+                let ranges =
+                    lexicographical_partition_ranges(&columns)?.collect::<Vec<_>>();
+                Ok(Some(Self { batch, ranges }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[inline]
+    fn is_last_range(&self, range: &Range<usize>) -> bool {
+        range.end == self.batch.num_rows()
+    }
+}
+
+struct StreamingBatch {
+    batch: Option<PartitionedRecordBatch>,
+    cur_row: usize,
+    cur_range: usize,
+    num_rows: usize,
+    num_ranges: uszie,
+    is_new_key: bool,
+    on_column: Vec<Column>,
+    sort: Vec<PhysicalSortExpr>,
+}
+
+impl StreamingBatch {
+    fn new(on_column: Vec<Column>, sort: Vec<PhysicalSortExpr>) -> Self {
+        Self {
+            batch: None,
+            cur_row: 0,
+            cur_range: 0,
+            num_rows: 0,
+            num_ranges: 0,
+            is_new_key: true,
+            on_column,
+            sort,
+        }
+    }
+
+    fn rest_batch(&mut self, prb: Option<PartitionedRecordBatch>) {
+        self.batch = prb;
+        if let Some(prb) = &self.batch {
+            self.cur_row = 0;
+            self.cur_range = 0;
+            self.num_rows = prb.batch.num_rows();
+            self.num_ranges = prb.ranges.len();
+            self.is_new_key = true;
+        };
+    }
+
+    fn key_any_null(&self) -> bool {
+        match &self.batch {
+            None => return true,
+            Some(batch) => {
+                for c in self.on_column {
+                    let array = batch.batch.column(c.index());
+                    if array.is_null(self.cur_row) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    #[inline]
+    fn is_finished(&self) -> bool {
+        self.batch.is_none() || self.num_rows == self.cur_row + 1
+    }
+
+    #[inline]
+    fn is_last_key_in_batch(&self) -> bool {
+        self.batch.is_none() || self.num_ranges == self.cur_range + 1
+    }
+
+    fn advance(&mut self) {
+        self.cur_row += 1;
+        self.is_new_key = false;
+        if !self.is_last_key_in_batch() {
+            let ranges = self.batch.unwrap().ranges;
+            if self.cur_row == ranges[self.cur_range + 1].start {
+                self.cur_range += 1;
+                self.is_new_key = true;
+            }
+        }
+    }
+
+    fn advance_key(&mut self) {
+        let ranges = self.batch.unwrap().ranges;
+        self.cur_range += 1;
+        self.cur_row = ranges[self.cur_range].start;
+        self.is_new_key = true;
+    }
+}
+
+/// Holding ranges for same key over several bathes
+struct BufferedBatches {
+    /// batches that contains the current key
+    /// TODO: make this spillable as well for skew on join key at buffer side
+    batches: VecDeque<PartitionedRecordBatch>,
+    /// ranges in each PartitionedRecordBatch that contains the current key
+    ranges: VecDeque<Range<usize>>,
+    /// row index in first batch to the record that starts this batch
+    key_idx: Option<usize>,
+    /// total number of rows for the current key
+    row_num: usize,
+    /// hold found but not currently used batch, to continue iteration
+    next_key_batch: Option<PartitionedRecordBatch>,
+    /// Join on column
+    on_column: Vec<Column>,
+    sort: Vec<PhysicalSortExpr>,
+}
+
+#[inline]
+fn range_len(range: &Range<usize>) -> usize {
+    range.end - range.start
+}
+
+impl BufferedBatches {
+    fn new(on_column: Vec<Column>, sort: Vec<PhysicalSortExpr>) -> Self {
+        Self {
+            batches: VecDeque::new(),
+            ranges: VecDeque::new(),
+            key_idx: None,
+            row_num: 0,
+            next_key_batch: None,
+            on_column,
+            sort,
+        }
+    }
+
+    fn key_any_null(&self) -> bool {
+        match &self.key_idx {
+            None => return true,
+            Some(key_idx) => {
+                let first_batch = &self.batches[0].batch;
+                for c in self.on_column {
+                    let array = first_batch.column(c.index());
+                    if array.is_null(*key_idx) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn is_finished(&self) -> Result<bool> {
+        match self.key_idx {
+            None => Ok(true),
+            Some(_) => match (self.batches.back(), self.ranges.back()) {
+                (Some(batch), Some(range)) => Ok(batch.is_last_range(range)),
+                _ => Err(DataFusionError::Execution(format!(
+                    "Batches length {} not equal to ranges length {}",
+                    self.batches.len(),
+                    self.ranges.len()
+                ))),
+            },
+        }
+    }
+
+    /// Whether the running key ends at the current batch `prb`, true for continues, false for ends.
+    fn running_key(&mut self, prb: &PartitionedRecordBatch) -> Result<bool> {
+        let first_range = &prb.ranges[0];
+        let range_len = range_len(first_range);
+        let current_batch = &prb.batch;
+        let single_range = prb.ranges.len() == 1;
+
+        // compare the first record in batch with the current key pointed by key_idx
+        match self.key_idx {
+            None => {
+                self.batches.push_back(prb.clone());
+                self.ranges.push_back(first_range.clone());
+                self.key_idx = Some(0);
+                self.row_num += range_len;
+                Ok(single_range)
+            }
+            Some(key_idx) => {
+                let key_arrays = join_arrays(&self.batches[0].batch, &self.on_column);
+                let current_arrays = join_arrays(current_batch, &self.on_column);
+                let equal = equal_rows(key_idx, 0, &key_arrays, &current_arrays)?;
+                if equal {
+                    self.batches.push_back(prb.clone());
+                    self.ranges.push_back(first_range.clone());
+                    self.row_num += range_len;
+                    Ok(single_range)
+                } else {
+                    self.next_key_batch = Some(prb.clone());
+                    Ok(false) // running key ends
+                }
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        self.batches.drain(..);
+        self.ranges.drain(..);
+        self.next_key_batch = None;
+    }
+
+    fn reset_batch(&mut self, prb: &PartitionedRecordBatch) {
+        self.cleanup();
+        self.batches.push_back(prb.clone());
+        let first_range = &prb.ranges[0];
+        self.ranges.push_back(first_range.clone());
+        self.key_idx = Some(0);
+        self.row_num = range_len(first_range);
+    }
+
+    /// Advance the cursor to the next key seen by this buffer
+    fn advance_in_current_batch(&mut self) {
+        assert_eq!(self.batches.len(), self.ranges.len());
+        if self.batches.len() > 1 {
+            self.batches.drain(0..(self.batches.len() - 1));
+            self.ranges.drain(0..(self.batches.len() - 1));
+        }
+
+        if let Some(batch) = self.batches.pop_back() {
+            let tail_range = self.ranges.pop_back().unwrap();
+            self.batches.push_back(batch);
+            let next_range_idx = batch
+                .ranges
+                .iter()
+                .find_position(|x| x.start == tail_range.start)
+                .unwrap()
+                .0;
+            self.key_idx = Some(tail_range.end);
+            self.ranges.push_back(batch.ranges[next_range_idx].clone());
+            self.row_num = range_len(&batch.ranges[next_range_idx]);
+        }
+    }
+}
+
+fn join_arrays(rb: &RecordBatch, on_column: &Vec<Column>) -> Vec<ArrayRef> {
+    on_column.iter().map(|c| rb.column(c.index())).collect()
+}
+
+struct SMJStream {
+    streamed: SendableRecordBatchStream,
+    buffered: SendableRecordBatchStream,
+    on_streamed: Vec<Column>,
+    on_buffered: Vec<Column>,
+    schema: Arc<Schema>,
+    /// Information of index and left / right placement of columns
+    column_indices: Vec<ColumnIndex>,
+    stream_batch: StreamingBatch,
+    buffered_batches: BufferedBatches,
+    result_sender: Sender<ArrowResult<RecordBatch>>,
+    result: SendableRecordBatchStream,
+    runtime: Arc<RuntimeEnv>,
+}
+
+impl RecordBatchStream for SMJStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Stream for SMJStream {
+    type Item = ArrowResult<RecordBatch>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+    }
+}
+
+fn make_mutable(data_type: &DataType, capacity: usize) -> Result<Box<dyn MutableArray>> {
+    Ok(match data_type.to_physical_type() {
+        PhysicalType::Boolean => Box::new(MutableBooleanArray::with_capacity(capacity))
+            as Box<dyn MutableArray>,
+        PhysicalType::Primitive(primitive) => {
+            with_match_primitive_type!(primitive, |$T| {
+                Box::new(MutablePrimitiveArray::<$T>::with_capacity(capacity).to(data_type.clone()))
+                    as Box<dyn MutableArray>
+            })
+        }
+        PhysicalType::Binary => {
+            Box::new(MutableBinaryArray::<i32>::with_capacity(capacity))
+                as Box<dyn MutableArray>
+        }
+        PhysicalType::Utf8 => Box::new(MutableUtf8Array::<i32>::with_capacity(capacity))
+            as Box<dyn MutableArray>,
+        _ => match data_type {
+            DataType::List(inner) => {
+                let values = make_mutable(inner.data_type(), 0)?;
+                Box::new(DynMutableListArray::<i32>::new_with_capacity(
+                    values, capacity,
+                )) as Box<dyn MutableArray>
+            }
+            DataType::FixedSizeBinary(size) => Box::new(
+                MutableFixedSizeBinaryArray::with_capacity(*size as usize, capacity),
+            ) as Box<dyn MutableArray>,
+            other => {
+                return Err(DataFusionError::Execution(format!(
+                    "making mutable of type {} is not implemented yet",
+                    data_type
+                )))
+            }
+        },
+    })
+}
+
+impl SMJStream {
+    fn new(
+        streamed: SendableRecordBatchStream,
+        buffered: SendableRecordBatchStream,
+        on_streamed: Vec<Column>,
+        on_buffered: Vec<Column>,
+        streamed_sort: Vec<PhysicalSortExpr>,
+        buffered_sort: Vec<PhysicalSortExpr>,
+        schema: Arc<Schema>,
+        runtime: Arc<RuntimeEnv>,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let column_indices = vec![];
+        Self {
+            streamed,
+            buffered,
+            on_streamed,
+            on_buffered,
+            schema,
+            column_indices,
+            stream_batch: StreamingBatch::new(on_streamed.clone(), streamed_sort),
+            buffered_batches: BufferedBatches::new(on_buffered.clone(), buffered_sort),
+            result_sender: tx,
+            result: RecordBatchReceiverStream::create(&schema, rx),
+            runtime,
+        }
+    }
+
+    async fn inner_join_driver(&mut self) -> Result<()> {
+        let targe_batch_size = self.runtime.batch_size();
+
+        if let Err(e) = self.result_sender.send().await {
+            println!("ERROR batch via inner join stream: {}", e);
+        };
+
+        let mut arrays: Vec<dyn MutableArray> =
+            Vec::with_capacity(self.schema.fields().len());
+        for (idx, field) in self.schema.fields().iter().enumerate() {
+            match field.data_type {
+                DataType::Int32 => {
+                    arrays.push(MutablePrimitiveArray::<i32>::with_capacity(
+                        targe_batch_size,
+                    ));
+                }
+                DataType::Utf8 => {
+                    arrays.push(MutableUtf8Array::with_capacity(targe_batch_size));
+                }
+                _ => {}
+            }
+        }
+
+        while self.find_next_inner_match()? {}
+
+        Ok(())
+    }
+
+    fn find_next_inner_match(&mut self) -> Result<bool> {
+        if self.stream_batch.key_any_null() {
+            let more_stream = self.advance_streamed_key_null_free()?;
+            if !more_stream {
+                return Ok(false);
+            }
+        }
+
+        if self.buffered_batches.key_any_null() {
+            let more_buffer = self.advance_buffered_key_null_free()?;
+            if !more_buffer {
+                return Ok(false);
+            }
+        }
+
+        loop {
+            let current_cmp = self.compare_stream_buffer();
+            match current_cmp {
+                Ordering::Less => {
+                    let more_stream = self.advance_streamed_key_null_free()?;
+                    if !more_stream {
+                        return Ok(false);
+                    }
+                }
+                Ordering::Equal => return Ok(true),
+                Ordering::Greater => {
+                    let more_buffer = self.advance_buffered_key_null_free()?;
+                    if !more_buffer {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// true for has next, false for ended
+    fn advance_streamed(&mut self) -> Result<bool> {
+        if self.stream_batch.is_finished() {
+            self.get_stream_next()?;
+            Ok(!self.stream_batch.is_finished())
+        } else {
+            self.stream_batch.advance();
+            Ok(true)
+        }
+    }
+
+    /// true for has next, false for ended
+    fn advance_streamed_key(&mut self) -> Result<bool> {
+        if self.stream_batch.is_finished() || self.stream_batch.is_last_key_in_batch() {
+            self.get_stream_next()?;
+            Ok(!self.stream_batch.is_finished())
+        } else {
+            self.stream_batch.advance_key();
+            Ok(true)
+        }
+    }
+
+    /// true for has next, false for ended
+    fn advance_streamed_key_null_free(&mut self) -> Result<bool> {
+        let mut more_stream_keys = self.advance_streamed_key()?;
+        loop {
+            if more_stream_keys && self.stream_batch.key_any_null() {
+                more_stream_keys = self.advance_streamed_key()?;
+            } else {
+                break;
+            }
+        }
+        Ok(more_stream_keys)
+    }
+
+    fn advance_buffered_key_null_free(&mut self) -> Result<bool> {
+        let mut more_buffered_keys = self.advance_buffered_key()?;
+        loop {
+            if more_buffered_keys && self.buffered_batches.key_any_null() {
+                more_buffered_keys = self.advance_buffered_key()?;
+            } else {
+                break;
+            }
+        }
+        Ok(more_buffered_keys)
+    }
+
+    /// true for has next, false for ended
+    fn advance_buffered_key(&mut self) -> Result<bool> {
+        if self.buffered_batches.is_finished() {
+            match &self.buffered_batches.next_key_batch {
+                None => {
+                    let batch = self.get_buffered_next()?;
+                    match batch {
+                        None => return Ok(false),
+                        Some(batch) => {
+                            self.buffered_batches.reset_batch(&batch);
+                        }
+                    }
+                }
+                Some(batch) => {
+                    self.buffered_batches.reset_batch(batch);
+                }
+            }
+        } else {
+            self.buffered_batches.advance_in_current_batch();
+        }
+        Ok(false)
+    }
+
+    /// true for has next, false for buffer side ended
+    fn cumulate_same_keys(&mut self) -> Result<bool> {
+        let batch = self.get_buffered_next()?;
+        match batch {
+            None => Ok(false),
+            Some(batch) => {
+                let more_batches = self.buffered_batches.running_key(&batch)?;
+                if more_batches {
+                    self.cumulate_same_keys()
+                } else {
+                    // reach end of current key, but the stream continues
+                    Ok(true)
+                }
+            }
+        }
+    }
+
+    fn compare_stream_buffer(&self) -> Ordering {
+        todo!()
+    }
+
+    fn get_stream_next(&mut self) -> Result<()> {
+        let batch = self.streamed.next().await.transpose()?;
+        let prb = PartitionedRecordBatch::new(batch, &self.stream_batch.sort)?;
+        self.stream_batch.rest_batch(prb);
+        Ok(())
+    }
+
+    fn get_buffered_next(&mut self) -> Result<Option<PartitionedRecordBatch>> {
+        let batch = self.buffered.next().await.transpose()?;
+        PartitionedRecordBatch::new(batch, &self.buffered_batches.sort)
+    }
+}
 
 // Maps a `u64` hash value based on the left ["on" values] to a list of indices with this key's value.
 //
@@ -66,7 +588,7 @@ type LargeStringArray = Utf8Array<i64>;
 // As the key is a hash value, we need to check possible hash collisions in the probe stage
 // During this stage it might be the case that a row is contained the same hashmap value,
 // but the values don't match. Those are checked in the [equal_rows] macro
-// TODO: speed up collission check and move away from using a hashbrown HashMap
+// TODO: speed up collision check and move away from using a hashbrown HashMap
 // https://github.com/apache/arrow-datafusion/issues/50
 struct JoinHashMap(RawTable<(u64, SmallVec<[u64; 1]>)>);
 
@@ -92,12 +614,6 @@ pub struct SortMergeJoinExec {
     join_type: JoinType,
     /// The schema once the join is applied
     schema: SchemaRef,
-    /// Build-side
-    build_side: Arc<Mutex<Option<JoinLeftData>>>,
-    /// Shares the `RandomState` for the hashing algorithm
-    random_state: RandomState,
-    /// Partitioning mode to use
-    mode: PartitionMode,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
 }
@@ -141,15 +657,6 @@ impl SortMergeJoinMetrics {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-/// Partitioning mode to use for hash join
-pub enum PartitionMode {
-    /// Left/right children are partitioned using the left and right keys
-    Partitioned,
-    /// Left side will collected into one partition
-    CollectLeft,
-}
-
 /// Information about the index and placement (left or right) of the columns
 struct ColumnIndex {
     /// Index of the column
@@ -159,7 +666,7 @@ struct ColumnIndex {
 }
 
 impl SortMergeJoinExec {
-    /// Tries to create a new [HashJoinExec].
+    /// Tries to create a new [SortMergeJoinExec].
     /// # Error
     /// This function errors when it is not possible to join the left and right sides on keys `on`.
     pub fn try_new(
@@ -167,7 +674,6 @@ impl SortMergeJoinExec {
         right: Arc<dyn ExecutionPlan>,
         on: JoinOn,
         join_type: &JoinType,
-        partition_mode: PartitionMode,
     ) -> Result<Self> {
         let left_schema = left.schema();
         let right_schema = right.schema();
@@ -175,17 +681,12 @@ impl SortMergeJoinExec {
 
         let schema = Arc::new(build_join_schema(&left_schema, &right_schema, join_type));
 
-        let random_state = RandomState::with_seeds(0, 0, 0, 0);
-
         Ok(SortMergeJoinExec {
             left,
             right,
             on,
             join_type: *join_type,
             schema,
-            build_side: Arc::new(Mutex::new(None)),
-            random_state,
-            mode: partition_mode,
             metrics: ExecutionPlanMetricsSet::new(),
         })
     }
@@ -208,11 +709,6 @@ impl SortMergeJoinExec {
     /// How the join is performed
     pub fn join_type(&self) -> &JoinType {
         &self.join_type
-    }
-
-    /// The partitioning mode of this hash join
-    pub fn partition_mode(&self) -> &PartitionMode {
-        &self.mode
     }
 
     /// Calculates column indices and left/right placement on input / output schemas and jointype
@@ -272,7 +768,6 @@ impl ExecutionPlan for SortMergeJoinExec {
                 children[1].clone(),
                 self.on.clone(),
                 &self.join_type,
-                self.mode,
             )?)),
             _ => Err(DataFusionError::Internal(
                 "HashJoinExec wrong number of children".to_string(),
@@ -437,7 +932,7 @@ impl ExecutionPlan for SortMergeJoinExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "HashJoinExec: mode={:?}, join_type={:?}, on={:?}",
+                    "SortMergeJoinExec: mode={:?}, join_type={:?}, on={:?}",
                     self.mode, self.join_type, self.on
                 )
             }
@@ -509,8 +1004,6 @@ struct SortMergeJoinStream {
     right: SendableRecordBatchStream,
     /// Information of index and left / right placement of columns
     column_indices: Vec<ColumnIndex>,
-    /// Random state used for hashing initialization
-    random_state: RandomState,
     /// Keeps track of the left side rows whether they are visited
     visited_left_side: Vec<bool>, // TODO: use a more memory efficient data structure, https://github.com/apache/arrow-datafusion/issues/240
     /// There is nothing to process anymore and left side is processed in case of left join
@@ -529,7 +1022,6 @@ impl SortMergeJoinStream {
         left_data: JoinLeftData,
         right: SendableRecordBatchStream,
         column_indices: Vec<ColumnIndex>,
-        random_state: RandomState,
         visited_left_side: Vec<bool>,
         join_metrics: SortMergeJoinMetrics,
     ) -> Self {
@@ -541,7 +1033,6 @@ impl SortMergeJoinStream {
             left_data,
             right,
             column_indices,
-            random_state,
             visited_left_side,
             is_exhausted: false,
             join_metrics,
@@ -595,11 +1086,9 @@ fn build_batch(
     join_type: JoinType,
     schema: &Schema,
     column_indices: &[ColumnIndex],
-    random_state: &RandomState,
 ) -> ArrowResult<(RecordBatch, UInt64Array)> {
     let (left_indices, right_indices) =
-        build_join_indexes(left_data, batch, join_type, on_left, on_right, random_state)
-            .unwrap();
+        build_join_indexes(left_data, batch, join_type, on_left, on_right).unwrap();
 
     if matches!(join_type, JoinType::Semi | JoinType::Anti) {
         return Ok((
@@ -651,13 +1140,12 @@ fn build_join_indexes(
     join_type: JoinType,
     left_on: &[Column],
     right_on: &[Column],
-    random_state: &RandomState,
 ) -> Result<(UInt64Array, UInt32Array)> {
-    let keys_values = right_on
+    let keys_values: Vec<ArrayRef> = right_on
         .iter()
         .map(|c| Ok(c.evaluate(right)?.into_array(right.num_rows())))
         .collect::<Result<Vec<_>>>()?;
-    let left_join_values = left_on
+    let left_join_values: Vec<ArrayRef> = left_on
         .iter()
         .map(|c| Ok(c.evaluate(&left_data.1)?.into_array(left_data.1.num_rows())))
         .collect::<Result<Vec<_>>>()?;
@@ -679,7 +1167,7 @@ fn build_join_indexes(
                 // This possibly contains rows with hash collisions,
                 // So we have to check here whether rows are equal or not
                 if let Some((_, indices)) =
-                left.0.get(*hash_value, |(hash, _)| *hash_value == *hash)
+                    left.0.get(*hash_value, |(hash, _)| *hash_value == *hash)
                 {
                     for &i in indices {
                         // Check hash collisions
@@ -711,7 +1199,7 @@ fn build_join_indexes(
             // First visit all of the rows
             for (row, hash_value) in hash_values.iter().enumerate() {
                 if let Some((_, indices)) =
-                left.0.get(*hash_value, |(hash, _)| *hash_value == *hash)
+                    left.0.get(*hash_value, |(hash, _)| *hash_value == *hash)
                 {
                     for &i in indices {
                         // Collision check
@@ -890,7 +1378,6 @@ impl Stream for SortMergeJoinStream {
                         self.join_type,
                         &self.schema,
                         &self.column_indices,
-                        &self.random_state,
                     );
                     self.join_metrics.input_batches.add(1);
                     self.join_metrics.input_rows.add(batch.num_rows());
@@ -921,27 +1408,27 @@ impl Stream for SortMergeJoinStream {
                         | JoinType::Full
                         | JoinType::Semi
                         | JoinType::Anti
-                        if !self.is_exhausted =>
-                            {
-                                let result = produce_from_matched(
-                                    &self.visited_left_side,
-                                    &self.schema,
-                                    &self.column_indices,
-                                    &self.left_data,
-                                    self.join_type != JoinType::Semi,
-                                );
+                            if !self.is_exhausted =>
+                        {
+                            let result = produce_from_matched(
+                                &self.visited_left_side,
+                                &self.schema,
+                                &self.column_indices,
+                                &self.left_data,
+                                self.join_type != JoinType::Semi,
+                            );
+                            if let Ok(ref batch) = result {
+                                self.join_metrics.input_batches.add(1);
+                                self.join_metrics.input_rows.add(batch.num_rows());
                                 if let Ok(ref batch) = result {
-                                    self.join_metrics.input_batches.add(1);
-                                    self.join_metrics.input_rows.add(batch.num_rows());
-                                    if let Ok(ref batch) = result {
-                                        self.join_metrics.output_batches.add(1);
-                                        self.join_metrics.output_rows.add(batch.num_rows());
-                                    }
+                                    self.join_metrics.output_batches.add(1);
+                                    self.join_metrics.output_rows.add(batch.num_rows());
                                 }
-                                timer.done();
-                                self.is_exhausted = true;
-                                return Some(result);
                             }
+                            timer.done();
+                            self.is_exhausted = true;
+                            return Some(result);
+                        }
                         JoinType::Left
                         | JoinType::Full
                         | JoinType::Semi
@@ -986,7 +1473,7 @@ mod tests {
         on: JoinOn,
         join_type: &JoinType,
     ) -> Result<SortMergeJoinExec> {
-        SortMergeJoinExec::try_new(left, right, on, join_type, PartitionMode::CollectLeft)
+        SortMergeJoinExec::try_new(left, right, on, join_type)
     }
 
     async fn join_collect(
@@ -1033,7 +1520,6 @@ mod tests {
             )?),
             on,
             join_type,
-            PartitionMode::Partitioned,
         )?;
 
         let columns = columns(&join.schema());
@@ -1114,7 +1600,7 @@ mod tests {
             on.clone(),
             &JoinType::Inner,
         )
-            .await?;
+        .await?;
 
         assert_eq!(columns, vec!["a1", "b1", "c1", "a2", "b1", "c2"]);
 
@@ -1551,7 +2037,7 @@ mod tests {
             on.clone(),
             &JoinType::Left,
         )
-            .await?;
+        .await?;
         assert_eq!(columns, vec!["a1", "b1", "c1", "a2", "b1", "c2"]);
 
         let expected = vec![
@@ -1753,49 +2239,6 @@ mod tests {
             "+----+----+----+----+----+----+",
         ];
         assert_batches_sorted_eq!(expected, &batches);
-
-        Ok(())
-    }
-
-    #[test]
-    fn join_with_hash_collision() -> Result<()> {
-        let mut hashmap_left = RawTable::with_capacity(2);
-        let left = build_table_i32(
-            ("a", &vec![10, 20]),
-            ("x", &vec![100, 200]),
-            ("y", &vec![200, 300]),
-        );
-
-        let random_state = RandomState::with_seeds(0, 0, 0, 0);
-        let hashes_buff = &mut vec![0; left.num_rows()];
-        let hashes =
-            create_hashes(&[left.columns()[0].clone()], &random_state, hashes_buff)?;
-
-        // Create hash collisions (same hashes)
-        hashmap_left.insert(hashes[0], (hashes[0], smallvec![0, 1]), |(h, _)| *h);
-        hashmap_left.insert(hashes[1], (hashes[1], smallvec![0, 1]), |(h, _)| *h);
-
-        let right = build_table_i32(
-            ("a", &vec![10, 20]),
-            ("b", &vec![0, 0]),
-            ("c", &vec![30, 40]),
-        );
-
-        let left_data = JoinLeftData::new((JoinHashMap(hashmap_left), left));
-        let (l, r) = build_join_indexes(
-            &left_data,
-            &right,
-            JoinType::Inner,
-            &[Column::new("a", 0)],
-            &[Column::new("a", 0)],
-            &random_state,
-        )?;
-
-        let left_ids = UInt64Array::from_slice(&[0, 1]);
-        let right_ids = UInt32Array::from_slice(&[0, 1]);
-
-        assert_eq!(left_ids, l);
-        assert_eq!(right_ids, r);
 
         Ok(())
     }

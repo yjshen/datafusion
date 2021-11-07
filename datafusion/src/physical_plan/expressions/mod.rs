@@ -142,6 +142,20 @@ impl PhysicalSortExpr {
     }
 }
 
+/// Convert sort expressions into Vec<SortColumn> that can be passed into arrow sort kernel
+pub fn exprs_to_sort_columns(
+    batch: &RecordBatch,
+    expr: &[PhysicalSortExpr],
+) -> Result<Vec<ArrowSortColumn>> {
+    let columns = expr
+        .iter()
+        .map(|e| e.evaluate_to_sort_column(&batch))
+        .collect::<Result<Vec<_>>>()
+        .map_err(DataFusionError::into_arrow_external_error)?;
+    let columns = columns.iter().map(|x| x.into()).collect::<Vec<_>>();
+    Ok(columns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,13 +19,14 @@
 
 use super::{RecordBatchStream, SendableRecordBatchStream};
 use crate::error::{DataFusionError, Result};
-use crate::physical_plan::expressions::PhysicalSortExpr;
+use crate::physical_plan::expressions::{exprs_to_sort_columns, PhysicalSortExpr};
 use crate::physical_plan::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
 use crate::physical_plan::{
     common, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, Statistics,
 };
+use arrow::compute::sort::SortColumn;
 pub use arrow::compute::sort::SortOptions;
 use arrow::compute::{sort::lexsort_to_indices, take};
 use arrow::datatypes::SchemaRef;
@@ -191,13 +192,7 @@ pub fn sort_batch(
     schema: SchemaRef,
     expr: &[PhysicalSortExpr],
 ) -> ArrowResult<RecordBatch> {
-    let columns = expr
-        .iter()
-        .map(|e| e.evaluate_to_sort_column(&batch))
-        .collect::<Result<Vec<_>>>()
-        .map_err(DataFusionError::into_arrow_external_error)?;
-    let columns = columns.iter().map(|x| x.into()).collect::<Vec<_>>();
-
+    let columns = exprs_to_sort_columns(&batch, expr)?;
     let indices = lexsort_to_indices::<i32>(&columns, None)?;
 
     // reorder all rows based on sorted indices
