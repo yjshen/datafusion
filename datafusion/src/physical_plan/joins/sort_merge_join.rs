@@ -474,6 +474,68 @@ fn repeat_n_times(
     }
 }
 
+fn range_start_indices(buffered_ranges: &VecDeque<Range<usize>>) -> Vec<usize> {
+    let mut idx = 0;
+    let mut start_indices: Vec<usize> = vec![];
+    buffered_ranges
+        .iter()
+        .for_each(|r| {
+            start_indices.push(idx);
+            idx += range_len(r);
+        })
+        .collect();
+    start_indices.push(usize::MAX);
+    start_indices
+}
+
+/// output buffered start `buffered_idx`, len `rows_to_output`
+/// (start_pos, len)
+fn slices_from_batches(
+    buffered_ranges: &&VecDeque<Range<usize>>,
+    start_indices: &Vec<usize>,
+    buffered_idx: usize,
+    rows_to_output: usize,
+) -> Vec<Pos> {
+    let mut buffered_idx = buffered_idx;
+    let mut slices: Vec<Pos> = vec![];
+    let mut rows_remaining = rows_to_output;
+    let find = start_indices
+        .iter()
+        .find_position(|&&start_idx| start_idx >= buffered_idx)
+        .unwrap();
+    let mut batch_idx = if find.1 == buffered_idx {
+        find.0
+    } else {
+        find.0 - 1
+    };
+
+    while rows_remaining > 0 {
+        let current_range = &buffered_ranges[batch_idx];
+        let range_start_idx = start_indices[batch_idx];
+        let start_row_idx = buffered_idx - range_start_idx + current_range.start;
+        let range_available = range_len(current_range) - (buffered_idx - range_start_idx);
+
+        if range_available >= rows_remaining {
+            slices.push(Pos {
+                batch_idx,
+                start_idx: start_row_idx,
+                len: rows_remaining,
+            });
+            rows_remaining = 0;
+        } else {
+            slices.push(Pos {
+                batch_idx,
+                start_idx: start_row_idx,
+                len: range_available,
+            });
+            rows_remaining -= range_available;
+            batch_idx += 1;
+            buffered_idx += range_available;
+        }
+    }
+    slices
+}
+
 struct Pos {
     batch_idx: usize,
     start_idx: usize,
@@ -511,66 +573,43 @@ impl SMJStream {
     async fn inner_join_driver(&mut self) -> Result<()> {
         let target_batch_size = self.runtime.batch_size();
 
-        let mut batch_available = target_batch_size;
+        let mut output_slots_available = target_batch_size;
         let mut arrays = new_arrays(&self.schema, target_batch_size)?;
 
         while self.find_next_inner_match()? {
-            let stream_repeat = self.buffered_batches.row_num;
+            let output_total = self.buffered_batches.row_num;
             let stream_batch = self.stream_batch.batch.unwrap().batch;
 
             let buffered_batches = &self.buffered_batches.batches;
             let buffered_ranges = &self.buffered_batches.ranges;
-            let mut idx = 0;
-            let mut start_indices: Vec<usize> = vec![];
-            let ranges: Vec<usize> = buffered_ranges
-                .iter()
-                .map(|r| {
-                    start_indices.push(idx);
-                    let len = range_len(r);
-                    idx += len;
-                })
-                .collect();
-            start_indices.push(usize::MAX);
 
-            let mut buffer_unfinished = true;
+            let start_indices = range_start_indices(buffered_ranges);
+
+            let mut unfinished = true;
             let mut buffered_idx = 0;
             let mut rows_to_output = 0;
 
             // until all buffered row output
-            while buffer_unfinished {
-                if batch_available >= stream_repeat {
-                    buffer_unfinished = false;
-                    rows_to_output = stream_repeat;
-                    batch_available -= stream_repeat;
+            while unfinished {
+                if output_slots_available >= output_total {
+                    unfinished = false;
+                    rows_to_output = output_total;
+                    output_slots_available -= output_total;
                 } else {
-                    buffered_idx += stream_repeat - batch_available;
-                    rows_to_output = batch_available;
-                    batch_available = 0;
+                     ->>>>>>>>>>> buffered_idx += output_total - output_slots_available;
+                    rows_to_output = output_slots_available;
+                    output_slots_available = 0;
                 }
 
+                // get slices for each buffered row batch for the current output
                 // output buffered start `buffered_idx`, len `rows_to_output`
                 // (start_pos, len)
-                let mut slices: Vec<Pos> = vec![];
-                let mut rows_remaining = rows_to_output;
-                let find = start_indices
-                    .iter()
-                    .find_position(|&&start_idx| start_idx >= buffered_idx)
-                    .unwrap();
-                let mut batch_idx = if find.1 == buffered_idx {
-                    find.0
-                } else {
-                    find.0 - 1
-                };
-
-                while rows_remaining > 0 {
-                    // TODO here
-
-                    slices.push(Pos {
-                        batch_idx,
-                        start_idx: x,
-                        len: l,
-                    })
-                }
+                let slices = slices_from_batches(
+                    &buffered_ranges,
+                    &start_indices,
+                    buffered_idx,
+                    rows_to_output,
+                );
 
                 arrays
                     .iter_mut()
@@ -584,7 +623,6 @@ impl SMJStream {
                             repeat_n_times(rows_to_output, array, from, from_row);
                         } else {
                             // output buffered start `buffered_idx`, len `rows_to_output`
-
                             match to.data_type().to_physical_type() {
                                 PhysicalType::Primitive(primitive) => match primitive {
                                     PrimitiveType::Int8 => {
@@ -611,7 +649,7 @@ impl SMJStream {
                         }
                     });
 
-                if batch_available == 0 {
+                if output_slots_available == 0 {
                     let result = make_batch(self.schema.clone(), arrays);
 
                     if let Err(e) = self.result_sender.send(result).await {
