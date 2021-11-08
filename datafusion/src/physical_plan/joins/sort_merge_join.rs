@@ -19,6 +19,7 @@
 //! into a set of partitions.
 
 use std::fmt;
+use std::iter::repeat;
 use std::sync::Arc;
 use std::{any::Any, usize};
 use std::{time::Instant, vec};
@@ -347,6 +348,29 @@ impl Stream for SMJStream {
     }
 }
 
+macro_rules! with_match_primitive_type {(
+    $key_type:expr, | $_:tt $T:ident | $($body:tt)*
+) => ({
+    macro_rules! __with_ty__ {( $_ $T:ident ) => ( $($body)* )}
+    use datafusion::arrow::datatypes::PrimitiveType::*;
+    use datafusion::arrow::types::{days_ms, months_days_ns};
+    match $key_type {
+        Int8 => __with_ty__! { i8 },
+        Int16 => __with_ty__! { i16 },
+        Int32 => __with_ty__! { i32 },
+        Int64 => __with_ty__! { i64 },
+        Int128 => __with_ty__! { i128 },
+        DaysMs => __with_ty__! { days_ms },
+        MonthDayNano => __with_ty__! { months_days_ns },
+        UInt8 => __with_ty__! { u8 },
+        UInt16 => __with_ty__! { u16 },
+        UInt32 => __with_ty__! { u32 },
+        UInt64 => __with_ty__! { u64 },
+        Float32 => __with_ty__! { f32 },
+        Float64 => __with_ty__! { f64 },
+    }
+})}
+
 fn make_mutable(data_type: &DataType, capacity: usize) -> Result<Box<dyn MutableArray>> {
     Ok(match data_type.to_physical_type() {
         PhysicalType::Boolean => Box::new(MutableBooleanArray::with_capacity(capacity))
@@ -383,6 +407,79 @@ fn make_mutable(data_type: &DataType, capacity: usize) -> Result<Box<dyn Mutable
     })
 }
 
+fn new_arrays(
+    schema: &Arc<Schema>,
+    batch_size: usize,
+) -> Result<Vec<Box<dyn MutableArray>>> {
+    let arrays: Vec<Box<dyn MutableArray>> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let dt = field.data_type.to_logical_type();
+            make_mutable(dt, batch_size)
+        })
+        .collect::<Result<_>>()?;
+    Ok(arrays)
+}
+
+fn make_batch(
+    schema: Arc<Schema>,
+    mut arrays: Vec<Box<dyn MutableArray>>,
+) -> ArrowResult<RecordBatch> {
+    let columns = arrays.iter_mut().map(|array| array.as_arc()).collect();
+    RecordBatch::try_new(schema, columns)
+}
+
+macro_rules! repeat_n {
+    ($TO:ty, $FROM:ty, $N:expr) => {{
+        let to = to.as_mut_any().downcast_mut::<$TO>().unwrap();
+        let from = from.as_any().downcast_ref::<$FROM>().unwrap();
+        let repeat_iter = from.slice(idx, 1).iter().flat_map(|v| repeat(v).take($N));
+        to.extend_trusted_len(repeat_iter);
+    }};
+}
+
+/// extend mutable with cell in `from` at `idx` of `rows_to_output` times.
+fn repeat_n_times(
+    rows_to_output: usize,
+    to: &mut Box<dyn MutableArray>,
+    from: &Arc<dyn Array>,
+    idx: usize,
+) {
+    match to.data_type().to_physical_type() {
+        PhysicalType::Boolean => {
+            repeat_n!(MutableBooleanArray, BooleanArray, rows_to_output)
+        }
+        PhysicalType::Primitive(primitive) => match primitive {
+            PrimitiveType::Int8 => repeat_n!(Int8Vec, Int8Array, rows_to_output),
+            PrimitiveType::Int16 => repeat_n!(Int16Vec, Int16Array, rows_to_output),
+            PrimitiveType::Int32 => repeat_n!(Int32Vec, Int32Array, rows_to_output),
+            PrimitiveType::Int64 => repeat_n!(Int64Vec, Int64Array, rows_to_output),
+            PrimitiveType::Float32 => repeat_n!(Float32Vec, Float32Array, rows_to_output),
+            PrimitiveType::Float64 => repeat_n!(Float64Vec, Float64Array, rows_to_output),
+            _ => todo!(),
+        },
+        PhysicalType::Utf8 => {
+            repeat_n!(MutableUtf8Array<i32>, Utf8Array<i32>, rows_to_output)
+        }
+        PhysicalType::Binary => {
+            repeat_n!(MutableBinaryArray<i32>, BinaryArray<i32>, rows_to_output)
+        }
+        PhysicalType::FixedSizeBinary => repeat_n!(
+            MutableFixedSizeBinaryArray,
+            FixedSizeBinaryArray,
+            rows_to_output
+        ),
+        _ => todo!(),
+    }
+}
+
+struct Pos {
+    batch_idx: usize,
+    start_idx: usize,
+    len: usize,
+}
+
 impl SMJStream {
     fn new(
         streamed: SendableRecordBatchStream,
@@ -412,29 +509,121 @@ impl SMJStream {
     }
 
     async fn inner_join_driver(&mut self) -> Result<()> {
-        let targe_batch_size = self.runtime.batch_size();
+        let target_batch_size = self.runtime.batch_size();
 
-        if let Err(e) = self.result_sender.send().await {
-            println!("ERROR batch via inner join stream: {}", e);
-        };
+        let mut batch_available = target_batch_size;
+        let mut arrays = new_arrays(&self.schema, target_batch_size)?;
 
-        let mut arrays: Vec<dyn MutableArray> =
-            Vec::with_capacity(self.schema.fields().len());
-        for (idx, field) in self.schema.fields().iter().enumerate() {
-            match field.data_type {
-                DataType::Int32 => {
-                    arrays.push(MutablePrimitiveArray::<i32>::with_capacity(
-                        targe_batch_size,
-                    ));
+        while self.find_next_inner_match()? {
+            let stream_repeat = self.buffered_batches.row_num;
+            let stream_batch = self.stream_batch.batch.unwrap().batch;
+
+            let buffered_batches = &self.buffered_batches.batches;
+            let buffered_ranges = &self.buffered_batches.ranges;
+            let mut idx = 0;
+            let mut start_indices: Vec<usize> = vec![];
+            let ranges: Vec<usize> = buffered_ranges
+                .iter()
+                .map(|r| {
+                    start_indices.push(idx);
+                    let len = range_len(r);
+                    idx += len;
+                })
+                .collect();
+            start_indices.push(usize::MAX);
+
+            let mut buffer_unfinished = true;
+            let mut buffered_idx = 0;
+            let mut rows_to_output = 0;
+
+            // until all buffered row output
+            while buffer_unfinished {
+                if batch_available >= stream_repeat {
+                    buffer_unfinished = false;
+                    rows_to_output = stream_repeat;
+                    batch_available -= stream_repeat;
+                } else {
+                    buffered_idx += stream_repeat - batch_available;
+                    rows_to_output = batch_available;
+                    batch_available = 0;
                 }
-                DataType::Utf8 => {
-                    arrays.push(MutableUtf8Array::with_capacity(targe_batch_size));
+
+                // output buffered start `buffered_idx`, len `rows_to_output`
+                // (start_pos, len)
+                let mut slices: Vec<Pos> = vec![];
+                let mut rows_remaining = rows_to_output;
+                let find = start_indices
+                    .iter()
+                    .find_position(|&&start_idx| start_idx >= buffered_idx)
+                    .unwrap();
+                let mut batch_idx = if find.1 == buffered_idx {
+                    find.0
+                } else {
+                    find.0 - 1
+                };
+
+                while rows_remaining > 0 {
+                    // TODO here
+
+                    slices.push(Pos {
+                        batch_idx,
+                        start_idx: x,
+                        len: l,
+                    })
                 }
-                _ => {}
+
+                arrays
+                    .iter_mut()
+                    .zip(self.schema.fields().iter())
+                    .zip(self.column_indices.iter())
+                    .map(|((array, field), column_index)| {
+                        if column_index.is_left {
+                            // repeat streamed `rows_to_output` times
+                            let from = stream_batch.column(column_index.index);
+                            let from_row = self.stream_batch.cur_row;
+                            repeat_n_times(rows_to_output, array, from, from_row);
+                        } else {
+                            // output buffered start `buffered_idx`, len `rows_to_output`
+
+                            match to.data_type().to_physical_type() {
+                                PhysicalType::Primitive(primitive) => match primitive {
+                                    PrimitiveType::Int8 => {
+                                        let to = array
+                                            .as_mut_any()
+                                            .downcast_mut::<Int8Vec>()
+                                            .unwrap();
+                                        for pos in slices {
+                                            let from = buffered_batches[pos.batch_idx]
+                                                .batch
+                                                .column(column_index.index)
+                                                .slice(pos.start_idx, pos.len);
+                                            let from = from
+                                                .as_any()
+                                                .downcast_ref::<Int8Array>()
+                                                .unwrap();
+                                            to.extend_trusted_len(from.iter());
+                                        }
+                                    }
+                                    _ => todo!(),
+                                },
+                                _ => todo!(),
+                            }
+                        }
+                    });
+
+                if batch_available == 0 {
+                    let result = make_batch(self.schema.clone(), arrays);
+
+                    if let Err(e) = self.result_sender.send(result).await {
+                        println!("ERROR batch via inner join stream: {}", e);
+                    };
+
+                    arrays = new_arrays(&self.schema, target_batch_size)?;
+                }
+
+                rows_to_output = 0;
             }
         }
-
-        while self.find_next_inner_match()? {}
 
         Ok(())
     }
