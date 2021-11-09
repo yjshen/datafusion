@@ -40,7 +40,7 @@ use crate::error::{DataFusionError, Result};
 use crate::logical_plan::JoinType;
 use crate::physical_plan::coalesce_batches::concat_batches;
 use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use crate::physical_plan::joins::{build_join_schema, check_join_is_valid, JoinOn};
+use crate::physical_plan::joins::{build_join_schema, check_join_is_valid, JoinOn, column_indices_from_schema};
 use crate::physical_plan::PhysicalExpr;
 use crate::physical_plan::{
     expressions::Column,
@@ -213,38 +213,6 @@ impl HashJoinExec {
     pub fn partition_mode(&self) -> &PartitionMode {
         &self.mode
     }
-
-    /// Calculates column indices and left/right placement on input / output schemas and jointype
-    fn column_indices_from_schema(&self) -> ArrowResult<Vec<ColumnIndex>> {
-        let (primary_is_left, primary_schema, secondary_schema) = match self.join_type {
-            JoinType::Inner
-            | JoinType::Left
-            | JoinType::Full
-            | JoinType::Semi
-            | JoinType::Anti => (true, self.left.schema(), self.right.schema()),
-            JoinType::Right => (false, self.right.schema(), self.left.schema()),
-        };
-        let mut column_indices = Vec::with_capacity(self.schema.fields().len());
-        for field in self.schema.fields() {
-            let (is_primary, index) = match primary_schema.index_of(field.name()) {
-                    Ok(i) => Ok((true, i)),
-                    Err(_) => {
-                        match secondary_schema.index_of(field.name()) {
-                            Ok(i) => Ok((false, i)),
-                            _ => Err(DataFusionError::Internal(
-                                format!("During execution, the column {} was not found in neither the left or right side of the join", field.name()).to_string()
-                            ))
-                        }
-                    }
-                }.map_err(DataFusionError::into_arrow_external_error)?;
-
-            let is_left =
-                is_primary && primary_is_left || !is_primary && !primary_is_left;
-            column_indices.push(ColumnIndex { index, is_left });
-        }
-
-        Ok(column_indices)
-    }
 }
 
 #[async_trait]
@@ -405,7 +373,12 @@ impl ExecutionPlan for HashJoinExec {
         let right_stream = self.right.execute(partition).await?;
         let on_right = self.on.iter().map(|on| on.1.clone()).collect::<Vec<_>>();
 
-        let column_indices = self.column_indices_from_schema()?;
+        let column_indices = column_indices_from_schema(
+            &self.join_type,
+            &self.left.schema(),
+            &self.right.schema(),
+            &self.schema,
+        )?;
         let num_rows = left_data.1.num_rows();
         let visited_left_side = match self.join_type {
             JoinType::Left | JoinType::Full | JoinType::Semi | JoinType::Anti => {

@@ -24,6 +24,7 @@ use crate::logical_plan::JoinType;
 use crate::physical_plan::expressions::Column;
 use arrow::datatypes::{Field, Schema};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// The on clause of the join, as vector of (left, right) columns.
 pub type JoinOn = Vec<(Column, Column)>;
@@ -100,6 +101,43 @@ pub fn build_join_schema(left: &Schema, right: &Schema, join_type: &JoinType) ->
         JoinType::Semi | JoinType::Anti => left.fields().clone(),
     };
     Schema::new(fields)
+}
+
+/// Calculates column indices and left/right placement on input / output schemas and jointype
+pub fn column_indices_from_schema(
+    join_type: &JoinType,
+    left_schema: &Arc<Schema>,
+    right_schema: &Arc<Schema>,
+    schema: &Arc<Schema>,
+) -> ArrowResult<Vec<ColumnIndex>> {
+    let (primary_is_left, primary_schema, secondary_schema) = match join_type {
+        JoinType::Inner
+        | JoinType::Left
+        | JoinType::Full
+        | JoinType::Semi
+        | JoinType::Anti => (true, left_schema, right_schema),
+        JoinType::Right => (false, right_schema, left_schema),
+    };
+    let mut column_indices = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        let (is_primary, index) = match primary_schema.index_of(field.name()) {
+            Ok(i) => Ok((true, i)),
+            Err(_) => {
+                match secondary_schema.index_of(field.name()) {
+                    Ok(i) => Ok((false, i)),
+                    _ => Err(DataFusionError::Internal(
+                        format!("During execution, the column {} was not found in neither the left or right side of the join", field.name()).to_string()
+                    ))
+                }
+            }
+        }.map_err(DataFusionError::into_arrow_external_error)?;
+
+        let is_left =
+            is_primary && primary_is_left || !is_primary && !primary_is_left;
+        column_indices.push(ColumnIndex { index, is_left });
+    }
+
+    Ok(column_indices)
 }
 
 #[cfg(test)]
