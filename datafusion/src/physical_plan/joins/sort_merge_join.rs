@@ -164,6 +164,8 @@ impl StreamingBatch {
                 self.cur_range += 1;
                 self.is_new_key = true;
             }
+        } else {
+            self.batch = None;
         }
     }
 
@@ -345,6 +347,7 @@ impl Stream for SMJStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        todo!()
     }
 }
 
@@ -439,37 +442,84 @@ macro_rules! repeat_n {
     }};
 }
 
-/// extend mutable with cell in `from` at `idx` of `rows_to_output` times.
-fn repeat_n_times(
-    rows_to_output: usize,
-    to: &mut Box<dyn MutableArray>,
-    from: &Arc<dyn Array>,
+/// repeat times of cell located by `idx` at streamed side to output
+fn repeat_streamed_cell(
+    stream_batch: &RecordBatch,
     idx: usize,
+    times: usize,
+    to: &mut Box<dyn MutableArray>,
+    column_index: &ColumnIndex,
 ) {
+    let from = stream_batch.column(column_index.index);
     match to.data_type().to_physical_type() {
         PhysicalType::Boolean => {
-            repeat_n!(MutableBooleanArray, BooleanArray, rows_to_output)
+            repeat_n!(MutableBooleanArray, BooleanArray, times)
         }
         PhysicalType::Primitive(primitive) => match primitive {
-            PrimitiveType::Int8 => repeat_n!(Int8Vec, Int8Array, rows_to_output),
-            PrimitiveType::Int16 => repeat_n!(Int16Vec, Int16Array, rows_to_output),
-            PrimitiveType::Int32 => repeat_n!(Int32Vec, Int32Array, rows_to_output),
-            PrimitiveType::Int64 => repeat_n!(Int64Vec, Int64Array, rows_to_output),
-            PrimitiveType::Float32 => repeat_n!(Float32Vec, Float32Array, rows_to_output),
-            PrimitiveType::Float64 => repeat_n!(Float64Vec, Float64Array, rows_to_output),
+            PrimitiveType::Int8 => repeat_n!(Int8Vec, Int8Array, times),
+            PrimitiveType::Int16 => repeat_n!(Int16Vec, Int16Array, times),
+            PrimitiveType::Int32 => repeat_n!(Int32Vec, Int32Array, times),
+            PrimitiveType::Int64 => repeat_n!(Int64Vec, Int64Array, times),
+            PrimitiveType::Float32 => repeat_n!(Float32Vec, Float32Array, times),
+            PrimitiveType::Float64 => repeat_n!(Float64Vec, Float64Array, times),
             _ => todo!(),
         },
         PhysicalType::Utf8 => {
-            repeat_n!(MutableUtf8Array<i32>, Utf8Array<i32>, rows_to_output)
+            repeat_n!(MutableUtf8Array<i32>, Utf8Array<i32>, times)
         }
         PhysicalType::Binary => {
-            repeat_n!(MutableBinaryArray<i32>, BinaryArray<i32>, rows_to_output)
+            repeat_n!(MutableBinaryArray<i32>, BinaryArray<i32>, times)
         }
-        PhysicalType::FixedSizeBinary => repeat_n!(
-            MutableFixedSizeBinaryArray,
-            FixedSizeBinaryArray,
-            rows_to_output
-        ),
+        PhysicalType::FixedSizeBinary => {
+            repeat_n!(MutableFixedSizeBinaryArray, FixedSizeBinaryArray, times)
+        }
+        _ => todo!(),
+    }
+}
+
+macro_rules! copy_slices {
+    ($TO:ty, $FROM:ty) => {{
+        let to = array.as_mut_any().downcast_mut::<$TO>().unwrap();
+        for pos in slices {
+            let from = buffered_batches[pos.batch_idx]
+                .batch
+                .column(column_index.index)
+                .slice(pos.start_idx, pos.len);
+            let from = from.as_any().downcast_ref::<$FROM>().unwrap();
+            to.extend_trusted_len(from.iter());
+        }
+    }};
+}
+
+fn copy_buffered_slices(
+    buffered_batches: &VecDeque<PartitionedRecordBatch>,
+    slices: &Vec<Slice>,
+    array: &mut Box<dyn MutableArray>,
+    column_index: &ColumnIndex,
+) {
+    // output buffered start `buffered_idx`, len `rows_to_output`
+    match to.data_type().to_physical_type() {
+        PhysicalType::Boolean => {
+            copy_slices!(MutableBooleanArray, BooleanArray)
+        }
+        PhysicalType::Primitive(primitive) => match primitive {
+            PrimitiveType::Int8 => copy_slices!(Int8Vec, Int8Array),
+            PrimitiveType::Int16 => copy_slices!(Int16Vec, Int16Array),
+            PrimitiveType::Int32 => copy_slices!(Int32Vec, Int32Array),
+            PrimitiveType::Int64 => copy_slices!(Int64Vec, Int64Array),
+            PrimitiveType::Float32 => copy_slices!(Float32Vec, Float32Array),
+            PrimitiveType::Float64 => copy_slices!(Float64Vec, Float64Array),
+            _ => todo!(),
+        },
+        PhysicalType::Utf8 => {
+            copy_slices!(MutableUtf8Array<i32>, Utf8Array<i32>)
+        }
+        PhysicalType::Binary => {
+            copy_slices!(MutableBinaryArray<i32>, BinaryArray<i32>)
+        }
+        PhysicalType::FixedSizeBinary => {
+            copy_slices!(MutableFixedSizeBinaryArray, FixedSizeBinaryArray)
+        }
         _ => todo!(),
     }
 }
@@ -488,55 +538,52 @@ fn range_start_indices(buffered_ranges: &VecDeque<Range<usize>>) -> Vec<usize> {
     start_indices
 }
 
-/// output buffered start `buffered_idx`, len `rows_to_output`
-/// (start_pos, len)
+/// Locate buffered records start from `buffered_idx` of `len`gth
+/// inside buffered batches.
 fn slices_from_batches(
-    buffered_ranges: &&VecDeque<Range<usize>>,
+    buffered_ranges: &VecDeque<Range<usize>>,
     start_indices: &Vec<usize>,
     buffered_idx: usize,
-    rows_to_output: usize,
-) -> Vec<Pos> {
-    let mut buffered_idx = buffered_idx;
-    let mut slices: Vec<Pos> = vec![];
-    let mut rows_remaining = rows_to_output;
+    len: usize,
+) -> Vec<Slice> {
+    let mut idx = buffered_idx;
+    let mut slices: Vec<Slice> = vec![];
+    let mut remaining = len;
     let find = start_indices
         .iter()
-        .find_position(|&&start_idx| start_idx >= buffered_idx)
+        .find_position(|&&start_idx| start_idx >= idx)
         .unwrap();
-    let mut batch_idx = if find.1 == buffered_idx {
-        find.0
-    } else {
-        find.0 - 1
-    };
+    let mut batch_idx = if find.1 == idx { find.0 } else { find.0 - 1 };
 
-    while rows_remaining > 0 {
+    while remaining > 0 {
         let current_range = &buffered_ranges[batch_idx];
         let range_start_idx = start_indices[batch_idx];
-        let start_row_idx = buffered_idx - range_start_idx + current_range.start;
-        let range_available = range_len(current_range) - (buffered_idx - range_start_idx);
+        let start_idx = idx - range_start_idx + current_range.start;
+        let range_available = range_len(current_range) - (idx - range_start_idx);
 
-        if range_available >= rows_remaining {
-            slices.push(Pos {
+        if range_available >= remaining {
+            slices.push(Slice {
                 batch_idx,
-                start_idx: start_row_idx,
-                len: rows_remaining,
+                start_idx,
+                len: remaining,
             });
-            rows_remaining = 0;
+            remaining = 0;
         } else {
-            slices.push(Pos {
+            slices.push(Slice {
                 batch_idx,
-                start_idx: start_row_idx,
+                start_idx,
                 len: range_available,
             });
-            rows_remaining -= range_available;
+            remaining -= range_available;
             batch_idx += 1;
-            buffered_idx += range_available;
+            idx += range_available;
         }
     }
     slices
 }
 
-struct Pos {
+/// Slice of batch at `batch_idx` inside BufferedBatches.
+struct Slice {
     batch_idx: usize,
     start_idx: usize,
     len: usize,
@@ -574,96 +621,110 @@ impl SMJStream {
         let target_batch_size = self.runtime.batch_size();
 
         let mut output_slots_available = target_batch_size;
-        let mut arrays = new_arrays(&self.schema, target_batch_size)?;
+        let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
 
         while self.find_next_inner_match()? {
-            let output_total = self.buffered_batches.row_num;
-            let stream_batch = self.stream_batch.batch.unwrap().batch;
+            loop {
+                let result = self
+                    .join_eq_records(
+                        target_batch_size,
+                        output_slots_available,
+                        output_arrays,
+                    )
+                    .await?;
+                output_slots_available = result.0;
+                output_arrays = result.1;
 
-            let buffered_batches = &self.buffered_batches.batches;
-            let buffered_ranges = &self.buffered_batches.ranges;
-
-            let start_indices = range_start_indices(buffered_ranges);
-
-            let mut unfinished = true;
-            let mut buffered_idx = 0;
-            let mut rows_to_output = 0;
-
-            // until all buffered row output
-            while unfinished {
-                if output_slots_available >= output_total {
-                    unfinished = false;
-                    rows_to_output = output_total;
-                    output_slots_available -= output_total;
-                } else {
-                     ->>>>>>>>>>> buffered_idx += output_total - output_slots_available;
-                    rows_to_output = output_slots_available;
-                    output_slots_available = 0;
+                self.stream_batch.advance();
+                if self.stream_batch.is_new_key {
+                    break;
                 }
-
-                // get slices for each buffered row batch for the current output
-                // output buffered start `buffered_idx`, len `rows_to_output`
-                // (start_pos, len)
-                let slices = slices_from_batches(
-                    &buffered_ranges,
-                    &start_indices,
-                    buffered_idx,
-                    rows_to_output,
-                );
-
-                arrays
-                    .iter_mut()
-                    .zip(self.schema.fields().iter())
-                    .zip(self.column_indices.iter())
-                    .map(|((array, field), column_index)| {
-                        if column_index.is_left {
-                            // repeat streamed `rows_to_output` times
-                            let from = stream_batch.column(column_index.index);
-                            let from_row = self.stream_batch.cur_row;
-                            repeat_n_times(rows_to_output, array, from, from_row);
-                        } else {
-                            // output buffered start `buffered_idx`, len `rows_to_output`
-                            match to.data_type().to_physical_type() {
-                                PhysicalType::Primitive(primitive) => match primitive {
-                                    PrimitiveType::Int8 => {
-                                        let to = array
-                                            .as_mut_any()
-                                            .downcast_mut::<Int8Vec>()
-                                            .unwrap();
-                                        for pos in slices {
-                                            let from = buffered_batches[pos.batch_idx]
-                                                .batch
-                                                .column(column_index.index)
-                                                .slice(pos.start_idx, pos.len);
-                                            let from = from
-                                                .as_any()
-                                                .downcast_ref::<Int8Array>()
-                                                .unwrap();
-                                            to.extend_trusted_len(from.iter());
-                                        }
-                                    }
-                                    _ => todo!(),
-                                },
-                                _ => todo!(),
-                            }
-                        }
-                    });
-
-                if output_slots_available == 0 {
-                    let result = make_batch(self.schema.clone(), arrays);
-
-                    if let Err(e) = self.result_sender.send(result).await {
-                        println!("ERROR batch via inner join stream: {}", e);
-                    };
-
-                    arrays = new_arrays(&self.schema, target_batch_size)?;
-                }
-
-                rows_to_output = 0;
             }
         }
 
         Ok(())
+    }
+
+    async fn join_eq_records(
+        &mut self,
+        target_batch_size: usize,
+        output_slots_available: usize,
+        mut output_arrays: Vec<Box<dyn MutableArray>>,
+    ) -> Result<(usize, Vec<Box<dyn MutableArray>>)> {
+        let mut output_slots_available = output_slots_available;
+        let mut remaining = self.buffered_batches.row_num;
+        let stream_batch = &self.stream_batch.batch.unwrap().batch;
+        let stream_row = self.stream_batch.cur_row;
+
+        let buffered_batches = &self.buffered_batches.batches;
+        let buffered_ranges = &self.buffered_batches.ranges;
+
+        let mut unfinished = true;
+        let mut buffered_idx = 0;
+        let mut rows_to_output = 0;
+        let start_indices = range_start_indices(buffered_ranges);
+
+        // output each buffered matching record once
+        while unfinished {
+            if output_slots_available >= remaining {
+                unfinished = false;
+                rows_to_output = remaining;
+                output_slots_available -= remaining;
+                remaining = 0;
+            } else {
+                rows_to_output = output_slots_available;
+                output_slots_available = 0;
+                remaining -= rows_to_output;
+            }
+
+            // get slices for buffered side for the current output
+            let slices = slices_from_batches(
+                buffered_ranges,
+                &start_indices,
+                buffered_idx,
+                rows_to_output,
+            );
+
+            output_arrays
+                .iter_mut()
+                .zip(self.schema.fields().iter())
+                .zip(self.column_indices.iter())
+                .map(|((array, field), column_index)| {
+                    if column_index.is_left {
+                        // repeat streamed `rows_to_output` times
+                        repeat_streamed_cell(
+                            stream_batch,
+                            stream_row,
+                            rows_to_output,
+                            array,
+                            column_index,
+                        );
+                    } else {
+                        // copy buffered start from: `buffered_idx`, len: `rows_to_output`
+                        copy_buffered_slices(
+                            buffered_batches,
+                            &slices,
+                            array,
+                            column_index,
+                        )
+                    }
+                });
+
+            if output_slots_available == 0 {
+                let result = make_batch(self.schema.clone(), output_arrays);
+
+                if let Err(e) = self.result_sender.send(result).await {
+                    println!("ERROR batch via inner join stream: {}", e);
+                };
+
+                output_arrays = new_arrays(&self.schema, target_batch_size)?;
+                output_slots_available = target_batch_size;
+            }
+
+            buffered_idx += rows_to_output;
+            rows_to_output = 0;
+        }
+        Ok((output_slots_available, output_arrays))
     }
 
     fn find_next_inner_match(&mut self) -> Result<bool> {
@@ -1178,43 +1239,6 @@ impl ExecutionPlan for SortMergeJoinExec {
     }
 }
 
-/// Updates `hash` with new entries from [RecordBatch] evaluated against the expressions `on`,
-/// assuming that the [RecordBatch] corresponds to the `index`th
-fn update_hash(
-    on: &[Column],
-    batch: &RecordBatch,
-    hash_map: &mut JoinHashMap,
-    offset: usize,
-    random_state: &RandomState,
-    hashes_buffer: &mut Vec<u64>,
-) -> Result<()> {
-    // evaluate the keys
-    let keys_values = on
-        .iter()
-        .map(|c| Ok(c.evaluate(batch)?.into_array(batch.num_rows())))
-        .collect::<Result<Vec<_>>>()?;
-
-    // calculate the hash values
-    let hash_values = create_hashes(&keys_values, random_state, hashes_buffer)?;
-
-    // insert hashes to key of the hashmap
-    for (row, hash_value) in hash_values.iter().enumerate() {
-        let item = hash_map
-            .0
-            .get_mut(*hash_value, |(hash, _)| *hash_value == *hash);
-        if let Some((_, indices)) = item {
-            indices.push((row + offset) as u64);
-        } else {
-            hash_map.0.insert(
-                *hash_value,
-                (*hash_value, smallvec![(row + offset) as u64]),
-                |(hash, _)| *hash,
-            );
-        }
-    }
-    Ok(())
-}
-
 /// A stream that issues [RecordBatch]es as they arrive from the right  of the join.
 struct SortMergeJoinStream {
     /// Input schema
@@ -1270,222 +1294,6 @@ impl SortMergeJoinStream {
 impl RecordBatchStream for SortMergeJoinStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
-    }
-}
-
-/// Returns a new [RecordBatch] by combining the `left` and `right` according to `indices`.
-/// The resulting batch has [Schema] `schema`.
-/// # Error
-/// This function errors when:
-/// *
-fn build_batch_from_indices(
-    schema: &Schema,
-    left: &RecordBatch,
-    right: &RecordBatch,
-    left_indices: UInt64Array,
-    right_indices: UInt32Array,
-    column_indices: &[ColumnIndex],
-) -> ArrowResult<(RecordBatch, UInt64Array)> {
-    // build the columns of the new [RecordBatch]:
-    // 1. pick whether the column is from the left or right
-    // 2. based on the pick, `take` items from the different RecordBatches
-    let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
-
-    for column_index in column_indices {
-        let array = if column_index.is_left {
-            let array = left.column(column_index.index);
-            take::take(array.as_ref(), &left_indices)?.into()
-        } else {
-            let array = right.column(column_index.index);
-            take::take(array.as_ref(), &right_indices)?.into()
-        };
-        columns.push(array);
-    }
-    RecordBatch::try_new(Arc::new(schema.clone()), columns).map(|x| (x, left_indices))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_batch(
-    batch: &RecordBatch,
-    left_data: &JoinLeftData,
-    on_left: &[Column],
-    on_right: &[Column],
-    join_type: JoinType,
-    schema: &Schema,
-    column_indices: &[ColumnIndex],
-) -> ArrowResult<(RecordBatch, UInt64Array)> {
-    let (left_indices, right_indices) =
-        build_join_indexes(left_data, batch, join_type, on_left, on_right).unwrap();
-
-    if matches!(join_type, JoinType::Semi | JoinType::Anti) {
-        return Ok((
-            RecordBatch::new_empty(Arc::new(schema.clone())),
-            left_indices,
-        ));
-    }
-
-    build_batch_from_indices(
-        schema,
-        &left_data.1,
-        batch,
-        left_indices,
-        right_indices,
-        column_indices,
-    )
-}
-
-/// returns a vector with (index from left, index from right).
-/// The size of this vector corresponds to the total size of a joined batch
-// For a join on column A:
-// left       right
-//     batch 1
-// A B         A D
-// ---------------
-// 1 a         3 6
-// 2 b         1 2
-// 3 c         2 4
-//     batch 2
-// A B         A D
-// ---------------
-// 1 a         5 10
-// 2 b         2 2
-// 4 d         1 1
-// indices (batch, batch_row)
-// left       right
-// (0, 2)     (0, 0)
-// (0, 0)     (0, 1)
-// (0, 1)     (0, 2)
-// (1, 0)     (0, 1)
-// (1, 1)     (0, 2)
-// (0, 1)     (1, 1)
-// (0, 0)     (1, 2)
-// (1, 1)     (1, 1)
-// (1, 0)     (1, 2)
-fn build_join_indexes(
-    left_data: &JoinLeftData,
-    right: &RecordBatch,
-    join_type: JoinType,
-    left_on: &[Column],
-    right_on: &[Column],
-) -> Result<(UInt64Array, UInt32Array)> {
-    let keys_values: Vec<ArrayRef> = right_on
-        .iter()
-        .map(|c| Ok(c.evaluate(right)?.into_array(right.num_rows())))
-        .collect::<Result<Vec<_>>>()?;
-    let left_join_values: Vec<ArrayRef> = left_on
-        .iter()
-        .map(|c| Ok(c.evaluate(&left_data.1)?.into_array(left_data.1.num_rows())))
-        .collect::<Result<Vec<_>>>()?;
-    let hashes_buffer = &mut vec![0; keys_values[0].len()];
-    let hash_values = create_hashes(&keys_values, random_state, hashes_buffer)?;
-    let left = &left_data.0;
-
-    match join_type {
-        JoinType::Inner | JoinType::Semi | JoinType::Anti => {
-            // Using a buffer builder to avoid slower normal builder
-            let mut left_indices = MutableBuffer::<u64>::new();
-            let mut right_indices = MutableBuffer::<u32>::new();
-
-            // Visit all of the right rows
-            for (row, hash_value) in hash_values.iter().enumerate() {
-                // Get the hash and find it in the build index
-
-                // For every item on the left and right we check if it matches
-                // This possibly contains rows with hash collisions,
-                // So we have to check here whether rows are equal or not
-                if let Some((_, indices)) =
-                    left.0.get(*hash_value, |(hash, _)| *hash_value == *hash)
-                {
-                    for &i in indices {
-                        // Check hash collisions
-                        if equal_rows(i as usize, row, &left_join_values, &keys_values)? {
-                            left_indices.push(i as u64);
-                            right_indices.push(row as u32);
-                        }
-                    }
-                }
-            }
-
-            Ok((
-                PrimitiveArray::<u64>::from_data(
-                    DataType::UInt64,
-                    left_indices.into(),
-                    None,
-                ),
-                PrimitiveArray::<u32>::from_data(
-                    DataType::UInt32,
-                    right_indices.into(),
-                    None,
-                ),
-            ))
-        }
-        JoinType::Left => {
-            let mut left_indices = MutableBuffer::<u64>::new();
-            let mut right_indices = MutableBuffer::<u32>::new();
-
-            // First visit all of the rows
-            for (row, hash_value) in hash_values.iter().enumerate() {
-                if let Some((_, indices)) =
-                    left.0.get(*hash_value, |(hash, _)| *hash_value == *hash)
-                {
-                    for &i in indices {
-                        // Collision check
-                        if equal_rows(i as usize, row, &left_join_values, &keys_values)? {
-                            left_indices.push(i as u64);
-                            right_indices.push(row as u32);
-                        }
-                    }
-                };
-            }
-            Ok((
-                PrimitiveArray::<u64>::from_data(
-                    DataType::UInt64,
-                    left_indices.into(),
-                    None,
-                ),
-                PrimitiveArray::<u32>::from_data(
-                    DataType::UInt32,
-                    right_indices.into(),
-                    None,
-                ),
-            ))
-        }
-        JoinType::Right | JoinType::Full => {
-            let mut left_indices = MutablePrimitiveArray::<u64>::new();
-            let mut right_indices = MutablePrimitiveArray::<u32>::new();
-
-            for (row, hash_value) in hash_values.iter().enumerate() {
-                match left.0.get(*hash_value, |(hash, _)| *hash_value == *hash) {
-                    Some((_, indices)) => {
-                        let mut no_match = true;
-                        for &i in indices {
-                            if equal_rows(
-                                i as usize,
-                                row,
-                                &left_join_values,
-                                &keys_values,
-                            )? {
-                                left_indices.push(Some(i as u64));
-                                right_indices.push(Some(row as u32));
-                                no_match = false;
-                            }
-                        }
-                        // If no rows matched left, still must keep the right
-                        // with all nulls for left
-                        if no_match {
-                            left_indices.push(None);
-                            right_indices.push(Some(row as u32));
-                        }
-                    }
-                    None => {
-                        // when no match, add the row with None for the left side
-                        left_indices.push(None);
-                        right_indices.push(Some(row as u32));
-                    }
-                }
-            }
-            Ok((left_indices.into(), right_indices.into()))
-        }
     }
 }
 
