@@ -28,7 +28,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{Notify, RwLock};
 
 #[async_trait]
-pub(crate) trait ExecutionMemoryPool: Sync + Send + Debug {
+pub(crate) trait MemoryAllocationStrategist: Sync + Send + Debug {
     fn memory_available(&self) -> usize;
     fn memory_used(&self) -> usize;
     fn memory_used_partition(&self, partition_id: usize) -> usize;
@@ -44,11 +44,11 @@ pub(crate) trait ExecutionMemoryPool: Sync + Send + Debug {
     async fn release_all(&self, partition_id: usize) -> usize;
 }
 
-pub(crate) struct DummyExecutionMemoryPool {
+pub(crate) struct DummyAllocationStrategist {
     pool_size: usize,
 }
 
-impl DummyExecutionMemoryPool {
+impl DummyAllocationStrategist {
     pub fn new() -> Self {
         Self {
             pool_size: usize::MAX,
@@ -56,7 +56,7 @@ impl DummyExecutionMemoryPool {
     }
 }
 
-impl Debug for DummyExecutionMemoryPool {
+impl Debug for DummyAllocationStrategist {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("DummyExecutionMemoryPool")
             .field("total", &self.pool_size)
@@ -65,7 +65,7 @@ impl Debug for DummyExecutionMemoryPool {
 }
 
 #[async_trait]
-impl ExecutionMemoryPool for DummyExecutionMemoryPool {
+impl MemoryAllocationStrategist for DummyAllocationStrategist {
     fn memory_available(&self) -> usize {
         usize::MAX
     }
@@ -101,14 +101,14 @@ impl ExecutionMemoryPool for DummyExecutionMemoryPool {
     }
 }
 
-pub(crate) struct ConstraintExecutionMemoryPool {
+pub(crate) struct ConstraintEqualShareStrategist {
     pool_size: usize,
     /// memory usage per partition
     memory_usage: RwLock<HashMap<usize, usize>>,
     notify: Notify,
 }
 
-impl ConstraintExecutionMemoryPool {
+impl ConstraintEqualShareStrategist {
     pub fn new(size: usize) -> Self {
         Self {
             pool_size: size,
@@ -118,7 +118,7 @@ impl ConstraintExecutionMemoryPool {
     }
 }
 
-impl Debug for ConstraintExecutionMemoryPool {
+impl Debug for ConstraintEqualShareStrategist {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConstraintExecutionMemoryPool")
             .field("total", &self.pool_size)
@@ -128,7 +128,7 @@ impl Debug for ConstraintExecutionMemoryPool {
 }
 
 #[async_trait]
-impl ExecutionMemoryPool for ConstraintExecutionMemoryPool {
+impl MemoryAllocationStrategist for ConstraintEqualShareStrategist {
     fn memory_available(&self) -> usize {
         self.pool_size - self.memory_used()
     }

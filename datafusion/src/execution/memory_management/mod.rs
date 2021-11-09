@@ -17,12 +17,12 @@
 
 //! Manages all available memory during query execution
 
-pub mod memory_pool;
+pub mod allocation_strategist;
 
 use crate::error::DataFusionError::OutOfMemory;
 use crate::error::{DataFusionError, Result};
-use crate::execution::memory_management::memory_pool::{
-    ConstraintExecutionMemoryPool, DummyExecutionMemoryPool, ExecutionMemoryPool,
+use crate::execution::memory_management::allocation_strategist::{
+    ConstraintEqualShareStrategist, DummyAllocationStrategist, MemoryAllocationStrategist,
 };
 use async_trait::async_trait;
 use futures::lock::Mutex;
@@ -39,21 +39,21 @@ static mut CONSUMER_ID: AtomicUsize = AtomicUsize::new(0);
 /// Memory manager that enforces how execution memory is shared between all kinds of memory consumers.
 /// Execution memory refers to that used for computation in sorts, aggregations, joins and shuffles.
 pub struct MemoryManager {
-    execution_pool: Arc<dyn ExecutionMemoryPool>,
+    strategist: Arc<dyn MemoryAllocationStrategist>,
     partition_memory_manager: Arc<Mutex<HashMap<usize, PartitionMemoryManager>>>,
 }
 
 impl MemoryManager {
     /// Create memory manager based on configured execution pool size.
     pub fn new(exec_pool_size: usize) -> Self {
-        let execution_pool: Arc<dyn ExecutionMemoryPool> = if exec_pool_size == usize::MAX
+        let strategist: Arc<dyn MemoryAllocationStrategist> = if exec_pool_size == usize::MAX
         {
-            Arc::new(DummyExecutionMemoryPool::new())
+            Arc::new(DummyAllocationStrategist::new())
         } else {
-            Arc::new(ConstraintExecutionMemoryPool::new(exec_pool_size))
+            Arc::new(ConstraintEqualShareStrategist::new(exec_pool_size))
         };
         Self {
-            execution_pool,
+            strategist,
             partition_memory_manager: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -90,7 +90,7 @@ impl MemoryManager {
         required: usize,
         consumer: &MemoryConsumerId,
     ) -> usize {
-        self.execution_pool.acquire_memory(required, consumer).await
+        self.strategist.acquire_memory(required, consumer).await
     }
 
     pub(crate) async fn release_exec_pool_memory(
@@ -98,7 +98,7 @@ impl MemoryManager {
         release_size: usize,
         partition_id: usize,
     ) {
-        self.execution_pool
+        self.strategist
             .release_memory(release_size, partition_id)
             .await
     }
@@ -113,7 +113,7 @@ impl MemoryManager {
         real_size: usize,
         consumer: &MemoryConsumerId,
     ) {
-        self.execution_pool
+        self.strategist
             .update_usage(granted_size, real_size, consumer)
             .await
     }
@@ -124,16 +124,16 @@ impl MemoryManager {
         &self,
         partition_id: usize,
     ) -> usize {
-        self.execution_pool.release_all(partition_id).await
+        self.strategist.release_all(partition_id).await
     }
 
     #[allow(dead_code)]
     pub(crate) fn exec_memory_used(&self) -> usize {
-        self.execution_pool.memory_used()
+        self.strategist.memory_used()
     }
 
     pub(crate) fn exec_memory_used_for_partition(&self, partition_id: usize) -> usize {
-        self.execution_pool.memory_used_partition(partition_id)
+        self.strategist.memory_used_partition(partition_id)
     }
 }
 
