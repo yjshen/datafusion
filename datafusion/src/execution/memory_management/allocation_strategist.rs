@@ -29,18 +29,24 @@ use tokio::sync::{Notify, RwLock};
 
 #[async_trait]
 pub(crate) trait MemoryAllocationStrategist: Sync + Send + Debug {
+    /// Total memory available, which is pool_size - memory_used()
     fn memory_available(&self) -> usize;
+    /// Current memory used by all PartitionManagers
     fn memory_used(&self) -> usize;
+    /// Memory usage for a specific partition
     fn memory_used_partition(&self, partition_id: usize) -> usize;
-    async fn acquire_memory(&self, required: usize, consumer: &MemoryConsumerId)
-        -> usize;
+    /// Acquire memory from a partition
+    async fn acquire_memory(&self, required: usize, partition_id: usize) -> usize;
+    /// Update memory usage for a partition
     async fn update_usage(
         &self,
         granted_size: usize,
         real_size: usize,
-        consumer: &MemoryConsumerId,
+        partition_id: usize,
     );
+    /// release memory from partition
     async fn release_memory(&self, release_size: usize, partition_id: usize);
+    /// release all memory acquired by a partition
     async fn release_all(&self, partition_id: usize) -> usize;
 }
 
@@ -78,11 +84,7 @@ impl MemoryAllocationStrategist for DummyAllocationStrategist {
         0
     }
 
-    async fn acquire_memory(
-        &self,
-        required: usize,
-        _consumer: &MemoryConsumerId,
-    ) -> usize {
+    async fn acquire_memory(&self, required: usize, _partition_id: usize) -> usize {
         required
     }
 
@@ -90,7 +92,7 @@ impl MemoryAllocationStrategist for DummyAllocationStrategist {
         &self,
         _granted_size: usize,
         _real_size: usize,
-        _consumer: &MemoryConsumerId,
+        _partition_id: usize,
     ) {
     }
 
@@ -148,13 +150,8 @@ impl MemoryAllocationStrategist for ConstraintEqualShareStrategist {
         })
     }
 
-    async fn acquire_memory(
-        &self,
-        required: usize,
-        consumer: &MemoryConsumerId,
-    ) -> usize {
+    async fn acquire_memory(&self, required: usize, partition_id: usize) -> usize {
         assert!(required > 0);
-        let partition_id = consumer.partition_id;
         {
             let mut partition_usage = self.memory_usage.write().await;
             if !partition_usage.contains_key(&partition_id) {
@@ -208,7 +205,7 @@ impl MemoryAllocationStrategist for ConstraintEqualShareStrategist {
         &self,
         granted_size: usize,
         real_size: usize,
-        consumer: &MemoryConsumerId,
+        partition_id: usize,
     ) {
         assert!(granted_size > 0);
         assert!(real_size > 0);
