@@ -41,7 +41,10 @@ use crate::logical_plan::JoinType;
 use crate::physical_plan::coalesce_batches::concat_batches;
 use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use crate::physical_plan::expressions::{exprs_to_sort_columns, PhysicalSortExpr};
-use crate::physical_plan::joins::{build_join_schema, check_join_is_valid, JoinOn, column_indices_from_schema};
+use crate::physical_plan::joins::{
+    build_join_schema, check_join_is_valid, column_indices_from_schema, equal_rows,
+    JoinOn,
+};
 use crate::physical_plan::stream::RecordBatchReceiverStream;
 use crate::physical_plan::PhysicalExpr;
 use crate::physical_plan::{
@@ -866,28 +869,6 @@ impl SMJStream {
     }
 }
 
-// Maps a `u64` hash value based on the left ["on" values] to a list of indices with this key's value.
-//
-// Note that the `u64` keys are not stored in the hashmap (hence the `()` as key), but are only used
-// to put the indices in a certain bucket.
-// By allocating a `HashMap` with capacity for *at least* the number of rows for entries at the left side,
-// we make sure that we don't have to re-hash the hashmap, which needs access to the key (the hash in this case) value.
-// E.g. 1 -> [3, 6, 8] indicates that the column values map to rows 3, 6 and 8 for hash value 1
-// As the key is a hash value, we need to check possible hash collisions in the probe stage
-// During this stage it might be the case that a row is contained the same hashmap value,
-// but the values don't match. Those are checked in the [equal_rows] macro
-// TODO: speed up collision check and move away from using a hashbrown HashMap
-// https://github.com/apache/arrow-datafusion/issues/50
-struct JoinHashMap(RawTable<(u64, SmallVec<[u64; 1]>)>);
-
-impl fmt::Debug for JoinHashMap {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
-    }
-}
-
-type JoinLeftData = Arc<(JoinHashMap, RecordBatch)>;
-
 /// join execution plan executes partitions in parallel and combines them into a set of
 /// partitions.
 #[derive(Debug)]
@@ -1045,26 +1026,17 @@ impl ExecutionPlan for SortMergeJoinExec {
             &self.join_type,
             &self.left.schema(),
             &self.right.schema(),
-            &self.schema)?;
+            &self.schema,
+        )?;
 
-
-        let num_rows = left_data.1.num_rows();
-        let visited_left_side = match self.join_type {
-            JoinType::Left | JoinType::Full | JoinType::Semi | JoinType::Anti => {
-                vec![false; num_rows]
-            }
-            JoinType::Inner | JoinType::Right => vec![],
-        };
         Ok(Box::pin(SortMergeJoinStream::new(
             self.schema.clone(),
             on_left,
             on_right,
             self.join_type,
-            left_data,
-            right_stream,
+            left,
+            right,
             column_indices,
-            self.random_state.clone(),
-            visited_left_side,
             SortMergeJoinMetrics::new(partition, &self.metrics),
         )))
     }
@@ -1107,14 +1079,12 @@ struct SortMergeJoinStream {
     on_right: Vec<Column>,
     /// type of the join
     join_type: JoinType,
-    /// information from the left
-    left_data: JoinLeftData,
+    /// left
+    left: SendableRecordBatchStream,
     /// right
     right: SendableRecordBatchStream,
     /// Information of index and left / right placement of columns
     column_indices: Vec<ColumnIndex>,
-    /// Keeps track of the left side rows whether they are visited
-    visited_left_side: Vec<bool>, // TODO: use a more memory efficient data structure, https://github.com/apache/arrow-datafusion/issues/240
     /// There is nothing to process anymore and left side is processed in case of left join
     is_exhausted: bool,
     /// Metrics
@@ -1128,10 +1098,9 @@ impl SortMergeJoinStream {
         on_left: Vec<Column>,
         on_right: Vec<Column>,
         join_type: JoinType,
-        left_data: JoinLeftData,
+        left: SendableRecordBatchStream,
         right: SendableRecordBatchStream,
         column_indices: Vec<ColumnIndex>,
-        visited_left_side: Vec<bool>,
         join_metrics: SortMergeJoinMetrics,
     ) -> Self {
         SortMergeJoinStream {
@@ -1139,10 +1108,9 @@ impl SortMergeJoinStream {
             on_left,
             on_right,
             join_type,
-            left_data,
+            left,
             right,
             column_indices,
-            visited_left_side,
             is_exhausted: false,
             join_metrics,
         }
@@ -1153,102 +1121,6 @@ impl RecordBatchStream for SortMergeJoinStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
-}
-
-macro_rules! equal_rows_elem {
-    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident) => {{
-        let left_array = $l.as_any().downcast_ref::<$array_type>().unwrap();
-        let right_array = $r.as_any().downcast_ref::<$array_type>().unwrap();
-
-        match (left_array.is_null($left), right_array.is_null($right)) {
-            (false, false) => left_array.value($left) == right_array.value($right),
-            _ => false,
-        }
-    }};
-}
-
-/// Left and right row have equal values
-fn equal_rows(
-    left: usize,
-    right: usize,
-    left_arrays: &[ArrayRef],
-    right_arrays: &[ArrayRef],
-) -> Result<bool> {
-    let mut err = None;
-    let res = left_arrays
-        .iter()
-        .zip(right_arrays)
-        .all(|(l, r)| match l.data_type() {
-            DataType::Null => true,
-            DataType::Boolean => equal_rows_elem!(BooleanArray, l, r, left, right),
-            DataType::Int8 => equal_rows_elem!(Int8Array, l, r, left, right),
-            DataType::Int16 => equal_rows_elem!(Int16Array, l, r, left, right),
-            DataType::Int32 => equal_rows_elem!(Int32Array, l, r, left, right),
-            DataType::Int64 => equal_rows_elem!(Int64Array, l, r, left, right),
-            DataType::UInt8 => equal_rows_elem!(UInt8Array, l, r, left, right),
-            DataType::UInt16 => equal_rows_elem!(UInt16Array, l, r, left, right),
-            DataType::UInt32 => equal_rows_elem!(UInt32Array, l, r, left, right),
-            DataType::UInt64 => equal_rows_elem!(UInt64Array, l, r, left, right),
-            DataType::Timestamp(_, None) => {
-                equal_rows_elem!(Int64Array, l, r, left, right)
-            }
-            DataType::Utf8 => equal_rows_elem!(StringArray, l, r, left, right),
-            DataType::LargeUtf8 => equal_rows_elem!(LargeStringArray, l, r, left, right),
-            _ => {
-                // This is internal because we should have caught this before.
-                err = Some(Err(DataFusionError::Internal(
-                    "Unsupported data type in hasher".to_string(),
-                )));
-                false
-            }
-        });
-
-    err.unwrap_or(Ok(res))
-}
-
-// Produces a batch for left-side rows that have/have not been matched during the whole join
-fn produce_from_matched(
-    visited_left_side: &[bool],
-    schema: &SchemaRef,
-    column_indices: &[ColumnIndex],
-    left_data: &JoinLeftData,
-    unmatched: bool,
-) -> ArrowResult<RecordBatch> {
-    // Find indices which didn't match any right row (are false)
-    let indices = if unmatched {
-        visited_left_side
-            .iter()
-            .enumerate()
-            .filter(|&(_, &value)| !value)
-            .map(|(index, _)| index as u64)
-            .collect::<MutableBuffer<u64>>()
-    } else {
-        // produce those that did match
-        visited_left_side
-            .iter()
-            .enumerate()
-            .filter(|&(_, &value)| value)
-            .map(|(index, _)| index as u64)
-            .collect::<MutableBuffer<u64>>()
-    };
-
-    // generate batches by taking values from the left side and generating columns filled with null on the right side
-    let indices = UInt64Array::from_data(DataType::UInt64, indices.into(), None);
-
-    let num_rows = indices.len();
-    let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
-    for (idx, column_index) in column_indices.iter().enumerate() {
-        let array = if column_index.is_left {
-            let array = left_data.1.column(column_index.index);
-            take::take(array.as_ref(), &indices)?.into()
-        } else {
-            let datatype = schema.field(idx).data_type().clone();
-            new_null_array(datatype, num_rows).into()
-        };
-
-        columns.push(array);
-    }
-    RecordBatch::try_new(schema.clone(), columns)
 }
 
 impl Stream for SortMergeJoinStream {

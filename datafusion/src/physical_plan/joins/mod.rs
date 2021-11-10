@@ -22,7 +22,8 @@ pub mod sort_merge_join;
 use crate::error::{DataFusionError, Result};
 use crate::logical_plan::JoinType;
 use crate::physical_plan::expressions::Column;
-use arrow::datatypes::{Field, Schema};
+use arrow::array::ArrayRef;
+use arrow::datatypes::{DataType, Field, Schema};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -132,12 +133,62 @@ pub fn column_indices_from_schema(
             }
         }.map_err(DataFusionError::into_arrow_external_error)?;
 
-        let is_left =
-            is_primary && primary_is_left || !is_primary && !primary_is_left;
+        let is_left = is_primary && primary_is_left || !is_primary && !primary_is_left;
         column_indices.push(ColumnIndex { index, is_left });
     }
 
     Ok(column_indices)
+}
+
+macro_rules! equal_rows_elem {
+    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident) => {{
+        let left_array = $l.as_any().downcast_ref::<$array_type>().unwrap();
+        let right_array = $r.as_any().downcast_ref::<$array_type>().unwrap();
+
+        match (left_array.is_null($left), right_array.is_null($right)) {
+            (false, false) => left_array.value($left) == right_array.value($right),
+            _ => false,
+        }
+    }};
+}
+
+/// Left and right row have equal values
+fn equal_rows(
+    left: usize,
+    right: usize,
+    left_arrays: &[ArrayRef],
+    right_arrays: &[ArrayRef],
+) -> Result<bool> {
+    let mut err = None;
+    let res = left_arrays
+        .iter()
+        .zip(right_arrays)
+        .all(|(l, r)| match l.data_type() {
+            DataType::Null => true,
+            DataType::Boolean => equal_rows_elem!(BooleanArray, l, r, left, right),
+            DataType::Int8 => equal_rows_elem!(Int8Array, l, r, left, right),
+            DataType::Int16 => equal_rows_elem!(Int16Array, l, r, left, right),
+            DataType::Int32 => equal_rows_elem!(Int32Array, l, r, left, right),
+            DataType::Int64 => equal_rows_elem!(Int64Array, l, r, left, right),
+            DataType::UInt8 => equal_rows_elem!(UInt8Array, l, r, left, right),
+            DataType::UInt16 => equal_rows_elem!(UInt16Array, l, r, left, right),
+            DataType::UInt32 => equal_rows_elem!(UInt32Array, l, r, left, right),
+            DataType::UInt64 => equal_rows_elem!(UInt64Array, l, r, left, right),
+            DataType::Timestamp(_, None) => {
+                equal_rows_elem!(Int64Array, l, r, left, right)
+            }
+            DataType::Utf8 => equal_rows_elem!(StringArray, l, r, left, right),
+            DataType::LargeUtf8 => equal_rows_elem!(LargeStringArray, l, r, left, right),
+            _ => {
+                // This is internal because we should have caught this before.
+                err = Some(Err(DataFusionError::Internal(
+                    "Unsupported data type in hasher".to_string(),
+                )));
+                false
+            }
+        });
+
+    err.unwrap_or(Ok(res))
 }
 
 #[cfg(test)]
