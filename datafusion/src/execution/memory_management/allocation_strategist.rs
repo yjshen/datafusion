@@ -103,14 +103,14 @@ impl MemoryAllocationStrategist for DummyAllocationStrategist {
     }
 }
 
-pub(crate) struct ConstraintEqualShareStrategist {
+pub(crate) struct FairStrategist {
     pool_size: usize,
     /// memory usage per partition
     memory_usage: RwLock<HashMap<usize, usize>>,
     notify: Notify,
 }
 
-impl ConstraintEqualShareStrategist {
+impl FairStrategist {
     pub fn new(size: usize) -> Self {
         Self {
             pool_size: size,
@@ -120,7 +120,7 @@ impl ConstraintEqualShareStrategist {
     }
 }
 
-impl Debug for ConstraintEqualShareStrategist {
+impl Debug for FairStrategist {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConstraintExecutionMemoryPool")
             .field("total", &self.pool_size)
@@ -130,7 +130,7 @@ impl Debug for ConstraintEqualShareStrategist {
 }
 
 #[async_trait]
-impl MemoryAllocationStrategist for ConstraintEqualShareStrategist {
+impl MemoryAllocationStrategist for FairStrategist {
     fn memory_available(&self) -> usize {
         self.pool_size - self.memory_used()
     }
