@@ -22,7 +22,7 @@ pub mod allocation_strategist;
 use crate::error::DataFusionError::OutOfMemory;
 use crate::error::{DataFusionError, Result};
 use crate::execution::memory_management::allocation_strategist::{
-    ConstraintEqualShareStrategist, DummyAllocationStrategist, MemoryAllocationStrategist,
+    DummyAllocationStrategist, FairStrategist, MemoryAllocationStrategist,
 };
 use async_trait::async_trait;
 use futures::lock::Mutex;
@@ -50,7 +50,7 @@ impl MemoryManager {
             if exec_pool_size == usize::MAX {
                 Arc::new(DummyAllocationStrategist::new())
             } else {
-                Arc::new(ConstraintEqualShareStrategist::new(exec_pool_size))
+                Arc::new(FairStrategist::new(exec_pool_size))
             };
         Self {
             strategist,
