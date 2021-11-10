@@ -42,8 +42,8 @@ use crate::physical_plan::coalesce_batches::concat_batches;
 use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use crate::physical_plan::expressions::{exprs_to_sort_columns, PhysicalSortExpr};
 use crate::physical_plan::joins::{
-    build_join_schema, check_join_is_valid, column_indices_from_schema, equal_rows,
-    JoinOn,
+    build_join_schema, check_join_is_valid, column_indices_from_schema, comp_rows,
+    equal_rows, JoinOn,
 };
 use crate::physical_plan::stream::RecordBatchReceiverStream;
 use crate::physical_plan::PhysicalExpr;
@@ -746,7 +746,7 @@ impl SMJStream {
         }
 
         loop {
-            let current_cmp = self.compare_stream_buffer();
+            let current_cmp = self.compare_stream_buffer()?;
             match current_cmp {
                 Ordering::Less => {
                     let more_stream = self.advance_streamed_key_null_free()?;
@@ -852,8 +852,17 @@ impl SMJStream {
         }
     }
 
-    fn compare_stream_buffer(&self) -> Ordering {
-        todo!()
+    fn compare_stream_buffer(&self) -> Result<Ordering> {
+        let stream_arrays =
+            join_arrays(&self.stream_batch.batch.unwrap().batch, &self.on_streamed);
+        let buffer_arrays =
+            join_arrays(&self.buffered_batches.batches[0].batch, &self.on_buffered);
+        comp_rows(
+            self.stream_batch.cur_row,
+            self.buffered_batches.key_idx.unwrap(),
+            &stream_arrays,
+            &buffer_arrays,
+        )
     }
 
     fn get_stream_next(&mut self) -> Result<()> {

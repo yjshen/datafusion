@@ -24,6 +24,7 @@ use crate::logical_plan::JoinType;
 use crate::physical_plan::expressions::Column;
 use arrow::array::ArrayRef;
 use arrow::datatypes::{DataType, Field, Schema};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -189,6 +190,63 @@ fn equal_rows(
         });
 
     err.unwrap_or(Ok(res))
+}
+
+macro_rules! cmp_rows_elem {
+    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident) => {{
+        let left_array = $l.as_any().downcast_ref::<$array_type>().unwrap();
+        let right_array = $r.as_any().downcast_ref::<$array_type>().unwrap();
+
+        match (left_array.is_null($left), right_array.is_null($right)) {
+            (false, false) => {
+                let cmp = left_array
+                    .value($left)
+                    .partial_cmp(&right_array.value($right))?;
+                if cmp != Ordering::Equal {
+                    res = cmp;
+                    break;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }};
+}
+
+/// compare left row with right row
+fn comp_rows(
+    left: usize,
+    right: usize,
+    left_arrays: &[ArrayRef],
+    right_arrays: &[ArrayRef],
+) -> Result<Ordering> {
+    let mut res = Ordering::Equal;
+    for (l, r) in left_arrays.iter().zip(right_arrays) {
+        match l.data_type() {
+            DataType::Null => {}
+            DataType::Boolean => cmp_rows_elem!(BooleanArray, l, r, left, right),
+            DataType::Int8 => cmp_rows_elem!(Int8Array, l, r, left, right),
+            DataType::Int16 => cmp_rows_elem!(Int16Array, l, r, left, right),
+            DataType::Int32 => cmp_rows_elem!(Int32Array, l, r, left, right),
+            DataType::Int64 => cmp_rows_elem!(Int64Array, l, r, left, right),
+            DataType::UInt8 => cmp_rows_elem!(UInt8Array, l, r, left, right),
+            DataType::UInt16 => cmp_rows_elem!(UInt16Array, l, r, left, right),
+            DataType::UInt32 => cmp_rows_elem!(UInt32Array, l, r, left, right),
+            DataType::UInt64 => cmp_rows_elem!(UInt64Array, l, r, left, right),
+            DataType::Timestamp(_, None) => {
+                cmp_rows_elem!(Int64Array, l, r, left, right)
+            }
+            DataType::Utf8 => cmp_rows_elem!(StringArray, l, r, left, right),
+            DataType::LargeUtf8 => cmp_rows_elem!(LargeStringArray, l, r, left, right),
+            _ => {
+                // This is internal because we should have caught this before.
+                return Err(DataFusionError::Internal(
+                    "Unsupported data type in sort merge join comparator".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(res)
 }
 
 #[cfg(test)]
