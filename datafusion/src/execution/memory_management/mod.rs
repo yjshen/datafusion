@@ -46,12 +46,12 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create memory manager based on configured execution pool size.
     pub fn new(exec_pool_size: usize) -> Self {
-        let strategist: Arc<dyn MemoryAllocationStrategist> = if exec_pool_size == usize::MAX
-        {
-            Arc::new(DummyAllocationStrategist::new())
-        } else {
-            Arc::new(ConstraintEqualShareStrategist::new(exec_pool_size))
-        };
+        let strategist: Arc<dyn MemoryAllocationStrategist> =
+            if exec_pool_size == usize::MAX {
+                Arc::new(DummyAllocationStrategist::new())
+            } else {
+                Arc::new(ConstraintEqualShareStrategist::new(exec_pool_size))
+            };
         Self {
             strategist,
             partition_memory_manager: Arc::new(Mutex::new(HashMap::new())),
@@ -90,7 +90,9 @@ impl MemoryManager {
         required: usize,
         consumer: &MemoryConsumerId,
     ) -> usize {
-        self.strategist.acquire_memory(required, consumer).await
+        self.strategist
+            .acquire_memory(required, consumer.partition_id)
+            .await
     }
 
     pub(crate) async fn release_exec_pool_memory(
