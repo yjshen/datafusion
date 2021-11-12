@@ -45,6 +45,7 @@ use crate::physical_plan::joins::{
     build_join_schema, check_join_is_valid, column_indices_from_schema, comp_rows,
     equal_rows, JoinOn,
 };
+use crate::physical_plan::sorts::external_sort::ExternalSortExec;
 use crate::physical_plan::stream::RecordBatchReceiverStream;
 use crate::physical_plan::PhysicalExpr;
 use crate::physical_plan::{
@@ -322,7 +323,7 @@ fn join_arrays(rb: &RecordBatch, on_column: &Vec<Column>) -> Vec<ArrayRef> {
     on_column.iter().map(|c| rb.column(c.index())).collect()
 }
 
-struct SMJStream {
+struct SortMergeJoinDriver {
     streamed: SendableRecordBatchStream,
     buffered: SendableRecordBatchStream,
     on_streamed: Vec<Column>,
@@ -332,34 +333,15 @@ struct SMJStream {
     column_indices: Vec<ColumnIndex>,
     stream_batch: StreamingBatch,
     buffered_batches: BufferedBatches,
-    result_sender: Sender<ArrowResult<RecordBatch>>,
-    result: SendableRecordBatchStream,
     runtime: Arc<RuntimeEnv>,
-}
-
-impl RecordBatchStream for SMJStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
-
-impl Stream for SMJStream {
-    type Item = ArrowResult<RecordBatch>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        todo!()
-    }
 }
 
 macro_rules! with_match_primitive_type {(
     $key_type:expr, | $_:tt $T:ident | $($body:tt)*
 ) => ({
     macro_rules! __with_ty__ {( $_ $T:ident ) => ( $($body)* )}
-    use datafusion::arrow::datatypes::PrimitiveType::*;
-    use datafusion::arrow::types::{days_ms, months_days_ns};
+    use arrow::datatypes::PrimitiveType::*;
+    use arrow::types::{days_ms, months_days_ns};
     match $key_type {
         Int8 => __with_ty__! { i8 },
         Int16 => __with_ty__! { i16 },
@@ -592,7 +574,7 @@ struct Slice {
     len: usize,
 }
 
-impl SMJStream {
+impl SortMergeJoinDriver {
     fn new(
         streamed: SendableRecordBatchStream,
         buffered: SendableRecordBatchStream,
@@ -600,11 +582,10 @@ impl SMJStream {
         on_buffered: Vec<Column>,
         streamed_sort: Vec<PhysicalSortExpr>,
         buffered_sort: Vec<PhysicalSortExpr>,
+        column_indices: Vec<ColumnIndex>,
         schema: Arc<Schema>,
         runtime: Arc<RuntimeEnv>,
     ) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
-        let column_indices = vec![];
         Self {
             streamed,
             buffered,
@@ -614,13 +595,14 @@ impl SMJStream {
             column_indices,
             stream_batch: StreamingBatch::new(on_streamed.clone(), streamed_sort),
             buffered_batches: BufferedBatches::new(on_buffered.clone(), buffered_sort),
-            result_sender: tx,
-            result: RecordBatchReceiverStream::create(&schema, rx),
             runtime,
         }
     }
 
-    async fn inner_join_driver(&mut self) -> Result<()> {
+    async fn inner_join_driver(
+        &mut self,
+        sender: &Sender<ArrowResult<RecordBatch>>,
+    ) -> Result<()> {
         let target_batch_size = self.runtime.batch_size();
 
         let mut output_slots_available = target_batch_size;
@@ -633,6 +615,7 @@ impl SMJStream {
                         target_batch_size,
                         output_slots_available,
                         output_arrays,
+                        sender,
                     )
                     .await?;
                 output_slots_available = result.0;
@@ -653,6 +636,7 @@ impl SMJStream {
         target_batch_size: usize,
         output_slots_available: usize,
         mut output_arrays: Vec<Box<dyn MutableArray>>,
+        sender: &Sender<ArrowResult<RecordBatch>>,
     ) -> Result<(usize, Vec<Box<dyn MutableArray>>)> {
         let mut output_slots_available = output_slots_available;
         let mut remaining = self.buffered_batches.row_num;
@@ -716,7 +700,7 @@ impl SMJStream {
             if output_slots_available == 0 {
                 let result = make_batch(self.schema.clone(), output_arrays);
 
-                if let Err(e) = self.result_sender.send(result).await {
+                if let Err(e) = sender.send(result).await {
                     println!("ERROR batch via inner join stream: {}", e);
                 };
 
@@ -1038,16 +1022,71 @@ impl ExecutionPlan for SortMergeJoinExec {
             &self.schema,
         )?;
 
-        Ok(Box::pin(SortMergeJoinStream::new(
-            self.schema.clone(),
-            on_left,
-            on_right,
-            self.join_type,
-            left,
-            right,
-            column_indices,
-            SortMergeJoinMetrics::new(partition, &self.metrics),
-        )))
+        let (tx, rx): (
+            Sender<ArrowResult<RecordBatch>>,
+            Receiver<ArrowResult<RecordBatch>>,
+        ) = tokio::sync::mpsc::channel(2);
+
+        let left_sort = self
+            .left
+            .as_any()
+            .downcast_ref::<ExternalSortExec>()
+            .unwrap()
+            .expr()
+            .iter()
+            .map(|s| s.clone())
+            .collect::<Vec<_>>();
+        let right_sort = self
+            .right
+            .as_any()
+            .downcast_ref::<ExternalSortExec>()
+            .unwrap()
+            .expr()
+            .iter()
+            .map(|s| s.clone())
+            .collect::<Vec<_>>();
+
+        let mut driver = match self.join_type {
+            JoinType::Inner
+            | JoinType::Left
+            | JoinType::Full
+            | JoinType::Semi
+            | JoinType::Anti => SortMergeJoinDriver::new(
+                left,
+                right,
+                on_left,
+                on_right,
+                left_sort,
+                right_sort,
+                column_indices,
+                self.schema.clone(),
+                RUNTIME_ENV.clone(),
+            ),
+            JoinType::Right => SortMergeJoinDriver::new(
+                right,
+                left,
+                on_right,
+                on_left,
+                right_sort,
+                left_sort,
+                column_indices,
+                self.schema.clone(),
+                RUNTIME_ENV.clone(),
+            ),
+        };
+
+        match self.join_type {
+            JoinType::Inner => driver.inner_join_driver(&tx).await?,
+            JoinType::Left => {}
+            JoinType::Right => {}
+            JoinType::Full => {}
+            JoinType::Semi => {}
+            JoinType::Anti => {}
+        }
+
+        let result = RecordBatchReceiverStream::create(&schema, rx);
+
+        Ok(Box::pin(result))
     }
 
     fn fmt_as(
@@ -1059,8 +1098,8 @@ impl ExecutionPlan for SortMergeJoinExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "SortMergeJoinExec: mode={:?}, join_type={:?}, on={:?}",
-                    self.mode, self.join_type, self.on
+                    "SortMergeJoinExec: join_type={:?}, on={:?}",
+                    self.join_type, self.on
                 )
             }
         }
@@ -1075,145 +1114,6 @@ impl ExecutionPlan for SortMergeJoinExec {
         // There are some special cases though, for example:
         // - `A LEFT JOIN B ON A.col=B.col` with `COUNT_DISTINCT(B.col)=COUNT(B.col)`
         Statistics::default()
-    }
-}
-
-/// A stream that issues [RecordBatch]es as they arrive from the right  of the join.
-struct SortMergeJoinStream {
-    /// Input schema
-    schema: Arc<Schema>,
-    /// columns from the left
-    on_left: Vec<Column>,
-    /// columns from the right used to compute the hash
-    on_right: Vec<Column>,
-    /// type of the join
-    join_type: JoinType,
-    /// left
-    left: SendableRecordBatchStream,
-    /// right
-    right: SendableRecordBatchStream,
-    /// Information of index and left / right placement of columns
-    column_indices: Vec<ColumnIndex>,
-    /// There is nothing to process anymore and left side is processed in case of left join
-    is_exhausted: bool,
-    /// Metrics
-    join_metrics: SortMergeJoinMetrics,
-}
-
-#[allow(clippy::too_many_arguments)]
-impl SortMergeJoinStream {
-    fn new(
-        schema: Arc<Schema>,
-        on_left: Vec<Column>,
-        on_right: Vec<Column>,
-        join_type: JoinType,
-        left: SendableRecordBatchStream,
-        right: SendableRecordBatchStream,
-        column_indices: Vec<ColumnIndex>,
-        join_metrics: SortMergeJoinMetrics,
-    ) -> Self {
-        SortMergeJoinStream {
-            schema,
-            on_left,
-            on_right,
-            join_type,
-            left,
-            right,
-            column_indices,
-            is_exhausted: false,
-            join_metrics,
-        }
-    }
-}
-
-impl RecordBatchStream for SortMergeJoinStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
-
-impl Stream for SortMergeJoinStream {
-    type Item = ArrowResult<RecordBatch>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.right
-            .poll_next_unpin(cx)
-            .map(|maybe_batch| match maybe_batch {
-                Some(Ok(batch)) => {
-                    let timer = self.join_metrics.join_time.timer();
-                    let result = build_batch(
-                        &batch,
-                        &self.left_data,
-                        &self.on_left,
-                        &self.on_right,
-                        self.join_type,
-                        &self.schema,
-                        &self.column_indices,
-                    );
-                    self.join_metrics.input_batches.add(1);
-                    self.join_metrics.input_rows.add(batch.num_rows());
-                    if let Ok((ref batch, ref left_side)) = result {
-                        timer.done();
-                        self.join_metrics.output_batches.add(1);
-                        self.join_metrics.output_rows.add(batch.num_rows());
-
-                        match self.join_type {
-                            JoinType::Left
-                            | JoinType::Full
-                            | JoinType::Semi
-                            | JoinType::Anti => {
-                                left_side.iter().flatten().for_each(|x| {
-                                    self.visited_left_side[*x as usize] = true;
-                                });
-                            }
-                            JoinType::Inner | JoinType::Right => {}
-                        }
-                    }
-                    Some(result.map(|x| x.0))
-                }
-                other => {
-                    let timer = self.join_metrics.join_time.timer();
-                    // For the left join, produce rows for unmatched rows
-                    match self.join_type {
-                        JoinType::Left
-                        | JoinType::Full
-                        | JoinType::Semi
-                        | JoinType::Anti
-                            if !self.is_exhausted =>
-                        {
-                            let result = produce_from_matched(
-                                &self.visited_left_side,
-                                &self.schema,
-                                &self.column_indices,
-                                &self.left_data,
-                                self.join_type != JoinType::Semi,
-                            );
-                            if let Ok(ref batch) = result {
-                                self.join_metrics.input_batches.add(1);
-                                self.join_metrics.input_rows.add(batch.num_rows());
-                                if let Ok(ref batch) = result {
-                                    self.join_metrics.output_batches.add(1);
-                                    self.join_metrics.output_rows.add(batch.num_rows());
-                                }
-                            }
-                            timer.done();
-                            self.is_exhausted = true;
-                            return Some(result);
-                        }
-                        JoinType::Left
-                        | JoinType::Full
-                        | JoinType::Semi
-                        | JoinType::Anti
-                        | JoinType::Inner
-                        | JoinType::Right => {}
-                    }
-
-                    other
-                }
-            })
     }
 }
 
