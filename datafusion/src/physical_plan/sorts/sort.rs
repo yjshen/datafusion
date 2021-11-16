@@ -191,7 +191,8 @@ pub fn sort_batch(
     schema: SchemaRef,
     expr: &[PhysicalSortExpr],
 ) -> ArrowResult<RecordBatch> {
-    let columns = exprs_to_sort_columns(&batch, expr)?;
+    let columns = exprs_to_sort_columns(&batch, expr)
+        .map_err(DataFusionError::into_arrow_external_error)?;
     let indices = lexsort_to_indices::<i32>(
         &columns.iter().map(|x| x.into()).collect::<Vec<_>>(),
         None,

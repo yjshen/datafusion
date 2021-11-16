@@ -311,7 +311,7 @@ impl BufferedBatches {
 }
 
 fn join_arrays(rb: &RecordBatch, on_column: &Vec<Column>) -> Vec<ArrayRef> {
-    on_column.iter().map(|c| rb.column(c.index())).collect()
+    on_column.iter().map(|c| rb.column(c.index()).clone()).collect()
 }
 
 struct SortMergeJoinDriver {
@@ -413,8 +413,8 @@ macro_rules! repeat_n {
     ($TO:ty, $FROM:ty, $N:expr, $to: ident, $from: ident, $idx: ident) => {{
         let to = $to.as_mut_any().downcast_mut::<$TO>().unwrap();
         let from = $from.as_any().downcast_ref::<$FROM>().unwrap();
-        let repeat_iter = $from.slice($idx, 1).iter().flat_map(|v| repeat(v).take($N));
-        to.extend_trusted_len(repeat_iter);
+        let repeat_iter = $from.slice($idx, 1).iter().flat_map(|v| repeat(v).take($N)).collect::<Vec<_>>();
+        to.extend_trusted_len(repeat_iter.into_iter());
     }};
 }
 
@@ -575,8 +575,7 @@ fn range_start_indices(buffered_ranges: &VecDeque<Range<usize>>) -> Vec<usize> {
         .for_each(|r| {
             start_indices.push(idx);
             idx += range_len(r);
-        })
-        .collect();
+        });
     start_indices.push(usize::MAX);
     start_indices
 }
@@ -729,7 +728,7 @@ impl SortMergeJoinDriver {
                 get_match,
                 buffered_ended,
                 more_output,
-            } = self.find_next_outer(buffer_ends)?;
+            } = self.find_next_outer(buffer_ends).await?;
             if !more_output {
                 break;
             }
@@ -1080,7 +1079,7 @@ impl SortMergeJoinDriver {
                     if column_index.is_left {
                         copy_slices(&batch, &slice, array, column_index);
                     } else {
-                        (0..rows_to_output).for_each(array.push_null());
+                        (0..rows_to_output).for_each(|_| array.push_null());
                     }
                 });
 
@@ -1213,7 +1212,7 @@ impl SortMergeJoinDriver {
                 .zip(self.column_indices.iter())
                 .map(|((array, field), column_index)| {
                     if column_index.is_left {
-                        (0..rows_to_output).for_each(array.push_null());
+                        (0..rows_to_output).for_each(|_| array.push_null());
                     } else {
                         // copy buffered start from: `buffered_idx`, len: `rows_to_output`
                         copy_slices(&batches, &slices, array, column_index);
@@ -1272,8 +1271,8 @@ impl SortMergeJoinDriver {
         }
     }
 
-    fn find_next_outer(&mut self, buffer_ends: bool) -> Result<OuterMatchResult> {
-        let more_stream = self.advance_streamed_key()?;
+    async fn find_next_outer(&mut self, buffer_ends: bool) -> Result<OuterMatchResult> {
+        let more_stream = self.advance_streamed_key().await?;
         if buffer_ends {
             return Ok(OuterMatchResult {
                 get_match: false,
@@ -1290,7 +1289,7 @@ impl SortMergeJoinDriver {
             }
 
             if self.buffered_batches.key_any_null() {
-                let more_buffer = self.advance_buffered_key_null_free()?;
+                let more_buffer = self.advance_buffered_key_null_free().await?;
                 if !more_buffer {
                     return Ok(OuterMatchResult {
                         get_match: false,
@@ -1326,7 +1325,7 @@ impl SortMergeJoinDriver {
                         })
                     }
                     Ordering::Greater => {
-                        let more_buffer = self.advance_buffered_key_null_free()?;
+                        let more_buffer = self.advance_buffered_key_null_free().await?;
                         if !more_buffer {
                             return Ok(OuterMatchResult {
                                 get_match: false,
@@ -1389,7 +1388,7 @@ impl SortMergeJoinDriver {
 
     /// true for has next, false for ended
     async fn advance_buffered_key(&mut self) -> Result<bool> {
-        if self.buffered_batches.is_finished() {
+        if self.buffered_batches.is_finished()? {
             match &self.buffered_batches.next_key_batch {
                 None => {
                     let batch = self.get_buffered_next().await?;
@@ -1397,8 +1396,8 @@ impl SortMergeJoinDriver {
                         None => return Ok(false),
                         Some(batch) => {
                             self.buffered_batches.reset_batch(&batch);
-                            if &batch.ranges.len() == 1 {
-                                self.cumulate_same_keys()?;
+                            if batch.ranges.len() == 1 {
+                                self.cumulate_same_keys().await?;
                             }
                         }
                     }
@@ -1406,7 +1405,7 @@ impl SortMergeJoinDriver {
                 Some(batch) => {
                     self.buffered_batches.reset_batch(batch);
                     if batch.ranges.len() == 1 {
-                        self.cumulate_same_keys()?;
+                        self.cumulate_same_keys().await?;
                     }
                 }
             }
@@ -1429,7 +1428,7 @@ impl SortMergeJoinDriver {
             Some(batch) => {
                 let more_batches = self.buffered_batches.running_key(&batch)?;
                 if more_batches {
-                    self.cumulate_same_keys()
+                    self.cumulate_same_keys().await
                 } else {
                     // reach end of current key, but the stream continues
                     Ok(true)
@@ -1686,7 +1685,7 @@ impl ExecutionPlan for SortMergeJoinExec {
 
         let result = RecordBatchReceiverStream::create(&self.schema, rx);
 
-        Ok(Box::pin(result))
+        Ok(result)
     }
 
     fn fmt_as(
@@ -1730,6 +1729,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::physical_plan::PhysicalExpr;
 
     fn build_table(
         a: (&str, &Vec<i32>),

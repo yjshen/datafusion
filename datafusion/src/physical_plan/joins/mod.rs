@@ -214,7 +214,7 @@ macro_rules! cmp_rows_elem {
             (false, false) => {
                 let cmp = left_array
                     .value($left)
-                    .partial_cmp(&right_array.value($right))?;
+                    .partial_cmp(&right_array.value($right)).unwrap();
                 if cmp != Ordering::Equal {
                     $res = cmp;
                     break;

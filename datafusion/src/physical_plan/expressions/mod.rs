@@ -150,9 +150,8 @@ pub fn exprs_to_sort_columns(
     let columns = expr
         .iter()
         .map(|e| e.evaluate_to_sort_column(&batch))
-        .collect::<Result<Vec<_>>>()
-        .map_err(DataFusionError::into_arrow_external_error)?;
-    Ok(columns)
+        .collect::<Result<Vec<_>>>();
+    columns
 }
 
 #[cfg(test)]
