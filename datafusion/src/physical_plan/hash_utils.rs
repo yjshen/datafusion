@@ -17,7 +17,6 @@
 
 //! Functionality used both on logical and physical plans
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 pub use ahash::{CallHasher, RandomState};
@@ -26,11 +25,9 @@ use arrow::array::{
     Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array,
     UInt32Array, UInt64Array, UInt8Array, Utf8Array,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, TimeUnit};
 
 use crate::error::{DataFusionError, Result};
-use crate::logical_plan::JoinType;
-use crate::physical_plan::expressions::Column;
 
 // Combines two hashes into one hash
 #[inline]

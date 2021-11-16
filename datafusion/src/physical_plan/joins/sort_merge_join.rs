@@ -18,53 +18,42 @@
 //! Defines the join plan for executing partitions in parallel and then joining the results
 //! into a set of partitions.
 
-use std::fmt;
 use std::iter::repeat;
 use std::sync::Arc;
+use std::vec;
 use std::{any::Any, usize};
-use std::{time::Instant, vec};
 
-use arrow::compute::take;
+use arrow::array::*;
 use arrow::datatypes::*;
-use arrow::error::{ArrowError, Result as ArrowResult};
+use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
-use arrow::{array::*, buffer::MutableBuffer};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryStreamExt};
-use log::debug;
-use smallvec::{smallvec, SmallVec};
-use tokio::sync::Mutex;
+use futures::StreamExt;
 
+use crate::arrow_dyn_list_array::DynMutableListArray;
 use crate::error::{DataFusionError, Result};
 use crate::execution::runtime_env::RuntimeEnv;
+use crate::execution::runtime_env::RUNTIME_ENV;
 use crate::logical_plan::JoinType;
-use crate::physical_plan::coalesce_batches::concat_batches;
-use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use crate::physical_plan::expressions::{exprs_to_sort_columns, PhysicalSortExpr};
 use crate::physical_plan::joins::{
     build_join_schema, check_join_is_valid, column_indices_from_schema, comp_rows,
-    equal_rows, JoinOn,
+    equal_rows, ColumnIndex, JoinOn,
 };
 use crate::physical_plan::sorts::external_sort::ExternalSortExec;
 use crate::physical_plan::stream::RecordBatchReceiverStream;
-use crate::physical_plan::PhysicalExpr;
+use crate::physical_plan::Statistics;
 use crate::physical_plan::{
     expressions::Column,
     metrics::{self, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet},
 };
-use crate::physical_plan::{hash_utils::create_hashes, Statistics};
 use crate::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
-    SendableRecordBatchStream,
+    DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
 };
-use arrow::array::growable::GrowablePrimitive;
 use arrow::compute::partition::lexicographical_partition_ranges;
-use arrow::compute::sort::SortOptions;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 type StringArray = Utf8Array<i32>;
@@ -84,8 +73,10 @@ impl PartitionedRecordBatch {
         match batch {
             Some(batch) => {
                 let columns = exprs_to_sort_columns(&batch, expr)?;
-                let ranges =
-                    lexicographical_partition_ranges(&columns)?.collect::<Vec<_>>();
+                let ranges = lexicographical_partition_ranges(
+                    &columns.iter().map(|x| x.into()).collect::<Vec<_>>(),
+                )?
+                .collect::<Vec<_>>();
                 Ok(Some(Self { batch, ranges }))
             }
             None => Ok(None),
@@ -103,7 +94,7 @@ struct StreamingBatch {
     cur_row: usize,
     cur_range: usize,
     num_rows: usize,
-    num_ranges: uszie,
+    num_ranges: usize,
     is_new_key: bool,
     on_column: Vec<Column>,
     sort: Vec<PhysicalSortExpr>,
@@ -419,10 +410,10 @@ fn make_batch(
 }
 
 macro_rules! repeat_n {
-    ($TO:ty, $FROM:ty, $N:expr) => {{
-        let to = to.as_mut_any().downcast_mut::<$TO>().unwrap();
-        let from = from.as_any().downcast_ref::<$FROM>().unwrap();
-        let repeat_iter = from.slice(idx, 1).iter().flat_map(|v| repeat(v).take($N));
+    ($TO:ty, $FROM:ty, $N:expr, $to: ident, $from: ident, $idx: ident) => {{
+        let to = $to.as_mut_any().downcast_mut::<$TO>().unwrap();
+        let from = $from.as_any().downcast_ref::<$FROM>().unwrap();
+        let repeat_iter = $from.slice($idx, 1).iter().flat_map(|v| repeat(v).take($N));
         to.extend_trusted_len(repeat_iter);
     }};
 }
@@ -438,36 +429,54 @@ fn repeat_streamed_cell(
     let from = stream_batch.column(column_index.index);
     match to.data_type().to_physical_type() {
         PhysicalType::Boolean => {
-            repeat_n!(MutableBooleanArray, BooleanArray, times)
+            repeat_n!(MutableBooleanArray, BooleanArray, times, to, from, idx)
         }
         PhysicalType::Primitive(primitive) => match primitive {
-            PrimitiveType::Int8 => repeat_n!(Int8Vec, Int8Array, times),
-            PrimitiveType::Int16 => repeat_n!(Int16Vec, Int16Array, times),
-            PrimitiveType::Int32 => repeat_n!(Int32Vec, Int32Array, times),
-            PrimitiveType::Int64 => repeat_n!(Int64Vec, Int64Array, times),
-            PrimitiveType::Float32 => repeat_n!(Float32Vec, Float32Array, times),
-            PrimitiveType::Float64 => repeat_n!(Float64Vec, Float64Array, times),
+            PrimitiveType::Int8 => repeat_n!(Int8Vec, Int8Array, times, to, from, idx),
+            PrimitiveType::Int16 => repeat_n!(Int16Vec, Int16Array, times, to, from, idx),
+            PrimitiveType::Int32 => repeat_n!(Int32Vec, Int32Array, times, to, from, idx),
+            PrimitiveType::Int64 => repeat_n!(Int64Vec, Int64Array, times, to, from, idx),
+            PrimitiveType::Float32 => {
+                repeat_n!(Float32Vec, Float32Array, times, to, from, idx)
+            }
+            PrimitiveType::Float64 => {
+                repeat_n!(Float64Vec, Float64Array, times, to, from, idx)
+            }
             _ => todo!(),
         },
         PhysicalType::Utf8 => {
-            repeat_n!(MutableUtf8Array<i32>, Utf8Array<i32>, times)
+            repeat_n!(MutableUtf8Array<i32>, Utf8Array<i32>, times, to, from, idx)
         }
         PhysicalType::Binary => {
-            repeat_n!(MutableBinaryArray<i32>, BinaryArray<i32>, times)
+            repeat_n!(
+                MutableBinaryArray<i32>,
+                BinaryArray<i32>,
+                times,
+                to,
+                from,
+                idx
+            )
         }
         PhysicalType::FixedSizeBinary => {
-            repeat_n!(MutableFixedSizeBinaryArray, FixedSizeBinaryArray, times)
+            repeat_n!(
+                MutableFixedSizeBinaryArray,
+                FixedSizeBinaryArray,
+                times,
+                to,
+                from,
+                idx
+            )
         }
         _ => todo!(),
     }
 }
 
 macro_rules! copy_slices {
-    ($TO:ty, $FROM:ty) => {{
-        let to = array.as_mut_any().downcast_mut::<$TO>().unwrap();
-        for pos in slices {
-            let from = batches[pos.batch_idx]
-                .column(column_index.index)
+    ($TO:ty, $FROM:ty, $array: ident, $batches: ident, $slices: ident, $column_index: ident) => {{
+        let to = $array.as_mut_any().downcast_mut::<$TO>().unwrap();
+        for pos in $slices {
+            let from = $batches[pos.batch_idx]
+                .column($column_index.index)
                 .slice(pos.start_idx, pos.len);
             let from = from.as_any().downcast_ref::<$FROM>().unwrap();
             to.extend_trusted_len(from.iter());
@@ -482,27 +491,77 @@ fn copy_slices(
     column_index: &ColumnIndex,
 ) {
     // output buffered start `buffered_idx`, len `rows_to_output`
-    match to.data_type().to_physical_type() {
+    match array.data_type().to_physical_type() {
         PhysicalType::Boolean => {
-            copy_slices!(MutableBooleanArray, BooleanArray)
+            copy_slices!(
+                MutableBooleanArray,
+                BooleanArray,
+                array,
+                batches,
+                slices,
+                column_index
+            )
         }
         PhysicalType::Primitive(primitive) => match primitive {
-            PrimitiveType::Int8 => copy_slices!(Int8Vec, Int8Array),
-            PrimitiveType::Int16 => copy_slices!(Int16Vec, Int16Array),
-            PrimitiveType::Int32 => copy_slices!(Int32Vec, Int32Array),
-            PrimitiveType::Int64 => copy_slices!(Int64Vec, Int64Array),
-            PrimitiveType::Float32 => copy_slices!(Float32Vec, Float32Array),
-            PrimitiveType::Float64 => copy_slices!(Float64Vec, Float64Array),
+            PrimitiveType::Int8 => {
+                copy_slices!(Int8Vec, Int8Array, array, batches, slices, column_index)
+            }
+            PrimitiveType::Int16 => {
+                copy_slices!(Int16Vec, Int16Array, array, batches, slices, column_index)
+            }
+            PrimitiveType::Int32 => {
+                copy_slices!(Int32Vec, Int32Array, array, batches, slices, column_index)
+            }
+            PrimitiveType::Int64 => {
+                copy_slices!(Int64Vec, Int64Array, array, batches, slices, column_index)
+            }
+            PrimitiveType::Float32 => copy_slices!(
+                Float32Vec,
+                Float32Array,
+                array,
+                batches,
+                slices,
+                column_index
+            ),
+            PrimitiveType::Float64 => copy_slices!(
+                Float64Vec,
+                Float64Array,
+                array,
+                batches,
+                slices,
+                column_index
+            ),
             _ => todo!(),
         },
         PhysicalType::Utf8 => {
-            copy_slices!(MutableUtf8Array<i32>, Utf8Array<i32>)
+            copy_slices!(
+                MutableUtf8Array<i32>,
+                Utf8Array<i32>,
+                array,
+                batches,
+                slices,
+                column_index
+            )
         }
         PhysicalType::Binary => {
-            copy_slices!(MutableBinaryArray<i32>, BinaryArray<i32>)
+            copy_slices!(
+                MutableBinaryArray<i32>,
+                BinaryArray<i32>,
+                array,
+                batches,
+                slices,
+                column_index
+            )
         }
         PhysicalType::FixedSizeBinary => {
-            copy_slices!(MutableFixedSizeBinaryArray, FixedSizeBinaryArray)
+            copy_slices!(
+                MutableFixedSizeBinaryArray,
+                FixedSizeBinaryArray,
+                array,
+                batches,
+                slices,
+                column_index
+            )
         }
         _ => todo!(),
     }
@@ -607,7 +666,7 @@ impl SortMergeJoinDriver {
         let mut output_slots_available = target_batch_size;
         let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
 
-        while self.find_next_inner_match()? {
+        while self.find_next_inner_match().await? {
             loop {
                 let result = self
                     .join_eq_records(
@@ -639,9 +698,15 @@ impl SortMergeJoinDriver {
         let mut output_slots_available = target_batch_size;
         let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
 
-        while self.find_next_inner_match()? {
-            let result = self.stream_copy_buffer_omit(
-                target_batch_size, output_slots_available, output_arrays, sender).await?;
+        while self.find_next_inner_match().await? {
+            let result = self
+                .stream_copy_buffer_omit(
+                    target_batch_size,
+                    output_slots_available,
+                    output_arrays,
+                    sender,
+                )
+                .await?;
             output_slots_available = result.0;
             output_arrays = result.1;
         }
@@ -758,10 +823,10 @@ impl SortMergeJoinDriver {
 
         loop {
             if advance_buffer {
-                buffer_ends = !self.advance_buffered_key()?;
+                buffer_ends = !self.advance_buffered_key().await?;
             }
             if advance_stream {
-                stream_ends = !self.advance_streamed_key()?;
+                stream_ends = !self.advance_streamed_key().await?;
             }
 
             if stream_ends && buffer_ends {
@@ -1172,16 +1237,16 @@ impl SortMergeJoinDriver {
         Ok((output_slots_available, output_arrays))
     }
 
-    fn find_next_inner_match(&mut self) -> Result<bool> {
+    async fn find_next_inner_match(&mut self) -> Result<bool> {
         if self.stream_batch.key_any_null() {
-            let more_stream = self.advance_streamed_key_null_free()?;
+            let more_stream = self.advance_streamed_key_null_free().await?;
             if !more_stream {
                 return Ok(false);
             }
         }
 
         if self.buffered_batches.key_any_null() {
-            let more_buffer = self.advance_buffered_key_null_free()?;
+            let more_buffer = self.advance_buffered_key_null_free().await?;
             if !more_buffer {
                 return Ok(false);
             }
@@ -1191,14 +1256,14 @@ impl SortMergeJoinDriver {
             let current_cmp = self.compare_stream_buffer()?;
             match current_cmp {
                 Ordering::Less => {
-                    let more_stream = self.advance_streamed_key_null_free()?;
+                    let more_stream = self.advance_streamed_key_null_free().await?;
                     if !more_stream {
                         return Ok(false);
                     }
                 }
                 Ordering::Equal => return Ok(true),
                 Ordering::Greater => {
-                    let more_buffer = self.advance_buffered_key_null_free()?;
+                    let more_buffer = self.advance_buffered_key_null_free().await?;
                     if !more_buffer {
                         return Ok(false);
                     }
@@ -1276,9 +1341,9 @@ impl SortMergeJoinDriver {
     }
 
     /// true for has next, false for ended
-    fn advance_streamed(&mut self) -> Result<bool> {
+    async fn advance_streamed(&mut self) -> Result<bool> {
         if self.stream_batch.is_finished() {
-            self.get_stream_next()?;
+            self.get_stream_next().await?;
             Ok(!self.stream_batch.is_finished())
         } else {
             self.stream_batch.advance();
@@ -1287,9 +1352,9 @@ impl SortMergeJoinDriver {
     }
 
     /// true for has next, false for ended
-    fn advance_streamed_key(&mut self) -> Result<bool> {
+    async fn advance_streamed_key(&mut self) -> Result<bool> {
         if self.stream_batch.is_finished() || self.stream_batch.is_last_key_in_batch() {
-            self.get_stream_next()?;
+            self.get_stream_next().await?;
             Ok(!self.stream_batch.is_finished())
         } else {
             self.stream_batch.advance_key();
@@ -1298,11 +1363,11 @@ impl SortMergeJoinDriver {
     }
 
     /// true for has next, false for ended
-    fn advance_streamed_key_null_free(&mut self) -> Result<bool> {
-        let mut more_stream_keys = self.advance_streamed_key()?;
+    async fn advance_streamed_key_null_free(&mut self) -> Result<bool> {
+        let mut more_stream_keys = self.advance_streamed_key().await?;
         loop {
             if more_stream_keys && self.stream_batch.key_any_null() {
-                more_stream_keys = self.advance_streamed_key()?;
+                more_stream_keys = self.advance_streamed_key().await?;
             } else {
                 break;
             }
@@ -1310,11 +1375,11 @@ impl SortMergeJoinDriver {
         Ok(more_stream_keys)
     }
 
-    fn advance_buffered_key_null_free(&mut self) -> Result<bool> {
-        let mut more_buffered_keys = self.advance_buffered_key()?;
+    async fn advance_buffered_key_null_free(&mut self) -> Result<bool> {
+        let mut more_buffered_keys = self.advance_buffered_key().await?;
         loop {
             if more_buffered_keys && self.buffered_batches.key_any_null() {
-                more_buffered_keys = self.advance_buffered_key()?;
+                more_buffered_keys = self.advance_buffered_key().await?;
             } else {
                 break;
             }
@@ -1323,11 +1388,11 @@ impl SortMergeJoinDriver {
     }
 
     /// true for has next, false for ended
-    fn advance_buffered_key(&mut self) -> Result<bool> {
+    async fn advance_buffered_key(&mut self) -> Result<bool> {
         if self.buffered_batches.is_finished() {
             match &self.buffered_batches.next_key_batch {
                 None => {
-                    let batch = self.get_buffered_next()?;
+                    let batch = self.get_buffered_next().await?;
                     match batch {
                         None => return Ok(false),
                         Some(batch) => {
@@ -1350,15 +1415,15 @@ impl SortMergeJoinDriver {
             if self.buffered_batches.batches[0]
                 .is_last_range(&self.buffered_batches.ranges[0])
             {
-                self.cumulate_same_keys()?;
+                self.cumulate_same_keys().await?;
             }
         }
         Ok(false)
     }
 
     /// true for has next, false for buffer side ended
-    fn cumulate_same_keys(&mut self) -> Result<bool> {
-        let batch = self.get_buffered_next()?;
+    async fn cumulate_same_keys(&mut self) -> Result<bool> {
+        let batch = self.get_buffered_next().await?;
         match batch {
             None => Ok(false),
             Some(batch) => {
@@ -1386,14 +1451,14 @@ impl SortMergeJoinDriver {
         )
     }
 
-    fn get_stream_next(&mut self) -> Result<()> {
+    async fn get_stream_next(&mut self) -> Result<()> {
         let batch = self.streamed.next().await.transpose()?;
         let prb = PartitionedRecordBatch::new(batch, &self.stream_batch.sort)?;
         self.stream_batch.rest_batch(prb);
         Ok(())
     }
 
-    fn get_buffered_next(&mut self) -> Result<Option<PartitionedRecordBatch>> {
+    async fn get_buffered_next(&mut self) -> Result<Option<PartitionedRecordBatch>> {
         let batch = self.buffered.next().await.transpose()?;
         PartitionedRecordBatch::new(batch, &self.buffered_batches.sort)
     }
@@ -1460,14 +1525,6 @@ impl SortMergeJoinMetrics {
             output_rows,
         }
     }
-}
-
-/// Information about the index and placement (left or right) of the columns
-struct ColumnIndex {
-    /// Index of the column
-    index: usize,
-    /// Whether the column is at the left or right side
-    is_left: bool,
 }
 
 impl SortMergeJoinExec {
@@ -1627,7 +1684,7 @@ impl ExecutionPlan for SortMergeJoinExec {
             JoinType::Anti => driver.anti_join_driver(&tx).await?,
         }
 
-        let result = RecordBatchReceiverStream::create(&schema, rx);
+        let result = RecordBatchReceiverStream::create(&self.schema, rx);
 
         Ok(Box::pin(result))
     }

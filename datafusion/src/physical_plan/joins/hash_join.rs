@@ -42,7 +42,7 @@ use crate::physical_plan::coalesce_batches::concat_batches;
 use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use crate::physical_plan::joins::{
     build_join_schema, check_join_is_valid, column_indices_from_schema, equal_rows,
-    JoinOn,
+    ColumnIndex, JoinOn,
 };
 use crate::physical_plan::PhysicalExpr;
 use crate::physical_plan::{
@@ -150,14 +150,6 @@ pub enum PartitionMode {
     Partitioned,
     /// Left side will collected into one partition
     CollectLeft,
-}
-
-/// Information about the index and placement (left or right) of the columns
-struct ColumnIndex {
-    /// Index of the column
-    index: usize,
-    /// Whether the column is at the left or right side
-    is_left: bool,
 }
 
 impl HashJoinExec {

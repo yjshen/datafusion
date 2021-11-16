@@ -26,7 +26,6 @@ use crate::physical_plan::metrics::{
 use crate::physical_plan::{
     common, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, Statistics,
 };
-use arrow::compute::sort::SortColumn;
 pub use arrow::compute::sort::SortOptions;
 use arrow::compute::{sort::lexsort_to_indices, take};
 use arrow::datatypes::SchemaRef;
@@ -193,7 +192,10 @@ pub fn sort_batch(
     expr: &[PhysicalSortExpr],
 ) -> ArrowResult<RecordBatch> {
     let columns = exprs_to_sort_columns(&batch, expr)?;
-    let indices = lexsort_to_indices::<i32>(&columns, None)?;
+    let indices = lexsort_to_indices::<i32>(
+        &columns.iter().map(|x| x.into()).collect::<Vec<_>>(),
+        None,
+    )?;
 
     // reorder all rows based on sorted indices
     RecordBatch::try_new(

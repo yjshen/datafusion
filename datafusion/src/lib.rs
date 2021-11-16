@@ -230,6 +230,7 @@ pub mod variable;
 // re-export dependencies from arrow-rs to minimise version maintenance for crate users
 pub use arrow;
 
+mod arrow_dyn_list_array;
 mod arrow_temporal_util;
 
 #[cfg(test)]

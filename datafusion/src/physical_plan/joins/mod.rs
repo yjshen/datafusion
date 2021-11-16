@@ -23,10 +23,15 @@ use crate::error::{DataFusionError, Result};
 use crate::logical_plan::JoinType;
 use crate::physical_plan::expressions::Column;
 use arrow::array::ArrayRef;
+use arrow::array::*;
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::error::Result as ArrowResult;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
+
+type StringArray = Utf8Array<i32>;
+type LargeStringArray = Utf8Array<i64>;
 
 /// The on clause of the join, as vector of (left, right) columns.
 pub type JoinOn = Vec<(Column, Column)>;
@@ -103,6 +108,14 @@ pub fn build_join_schema(left: &Schema, right: &Schema, join_type: &JoinType) ->
         JoinType::Semi | JoinType::Anti => left.fields().clone(),
     };
     Schema::new(fields)
+}
+
+/// Information about the index and placement (left or right) of the columns
+struct ColumnIndex {
+    /// Index of the column
+    index: usize,
+    /// Whether the column is at the left or right side
+    is_left: bool,
 }
 
 /// Calculates column indices and left/right placement on input / output schemas and jointype
@@ -193,7 +206,7 @@ fn equal_rows(
 }
 
 macro_rules! cmp_rows_elem {
-    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident) => {{
+    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident, $res: ident) => {{
         let left_array = $l.as_any().downcast_ref::<$array_type>().unwrap();
         let right_array = $r.as_any().downcast_ref::<$array_type>().unwrap();
 
@@ -203,7 +216,7 @@ macro_rules! cmp_rows_elem {
                     .value($left)
                     .partial_cmp(&right_array.value($right))?;
                 if cmp != Ordering::Equal {
-                    res = cmp;
+                    $res = cmp;
                     break;
                 }
             }
@@ -223,20 +236,22 @@ fn comp_rows(
     for (l, r) in left_arrays.iter().zip(right_arrays) {
         match l.data_type() {
             DataType::Null => {}
-            DataType::Boolean => cmp_rows_elem!(BooleanArray, l, r, left, right),
-            DataType::Int8 => cmp_rows_elem!(Int8Array, l, r, left, right),
-            DataType::Int16 => cmp_rows_elem!(Int16Array, l, r, left, right),
-            DataType::Int32 => cmp_rows_elem!(Int32Array, l, r, left, right),
-            DataType::Int64 => cmp_rows_elem!(Int64Array, l, r, left, right),
-            DataType::UInt8 => cmp_rows_elem!(UInt8Array, l, r, left, right),
-            DataType::UInt16 => cmp_rows_elem!(UInt16Array, l, r, left, right),
-            DataType::UInt32 => cmp_rows_elem!(UInt32Array, l, r, left, right),
-            DataType::UInt64 => cmp_rows_elem!(UInt64Array, l, r, left, right),
+            DataType::Boolean => cmp_rows_elem!(BooleanArray, l, r, left, right, res),
+            DataType::Int8 => cmp_rows_elem!(Int8Array, l, r, left, right, res),
+            DataType::Int16 => cmp_rows_elem!(Int16Array, l, r, left, right, res),
+            DataType::Int32 => cmp_rows_elem!(Int32Array, l, r, left, right, res),
+            DataType::Int64 => cmp_rows_elem!(Int64Array, l, r, left, right, res),
+            DataType::UInt8 => cmp_rows_elem!(UInt8Array, l, r, left, right, res),
+            DataType::UInt16 => cmp_rows_elem!(UInt16Array, l, r, left, right, res),
+            DataType::UInt32 => cmp_rows_elem!(UInt32Array, l, r, left, right, res),
+            DataType::UInt64 => cmp_rows_elem!(UInt64Array, l, r, left, right, res),
             DataType::Timestamp(_, None) => {
-                cmp_rows_elem!(Int64Array, l, r, left, right)
+                cmp_rows_elem!(Int64Array, l, r, left, right, res)
             }
-            DataType::Utf8 => cmp_rows_elem!(StringArray, l, r, left, right),
-            DataType::LargeUtf8 => cmp_rows_elem!(LargeStringArray, l, r, left, right),
+            DataType::Utf8 => cmp_rows_elem!(StringArray, l, r, left, right, res),
+            DataType::LargeUtf8 => {
+                cmp_rows_elem!(LargeStringArray, l, r, left, right, res)
+            }
             _ => {
                 // This is internal because we should have caught this before.
                 return Err(DataFusionError::Internal(

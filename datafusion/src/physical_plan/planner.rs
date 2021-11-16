@@ -47,7 +47,7 @@ use crate::physical_plan::repartition::RepartitionExec;
 use crate::physical_plan::sorts::sort::SortExec;
 use crate::physical_plan::udf;
 use crate::physical_plan::windows::WindowAggExec;
-use crate::physical_plan::{hash_utils, joins, Partitioning};
+use crate::physical_plan::{joins, Partitioning};
 use crate::physical_plan::{AggregateExpr, ExecutionPlan, PhysicalExpr, WindowExpr};
 use crate::scalar::ScalarValue;
 use crate::sql::utils::{generate_sort_key, window_expr_common_partition_keys};
