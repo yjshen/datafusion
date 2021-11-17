@@ -311,7 +311,50 @@ impl BufferedBatches {
 }
 
 fn join_arrays(rb: &RecordBatch, on_column: &Vec<Column>) -> Vec<ArrayRef> {
-    on_column.iter().map(|c| rb.column(c.index()).clone()).collect()
+    on_column
+        .iter()
+        .map(|c| rb.column(c.index()).clone())
+        .collect()
+}
+
+struct OutputBuffer {
+    arrays: Vec<Box<dyn MutableArray>>,
+    target_batch_size: usize,
+    slots_available: usize,
+    schema: Arc<Schema>,
+}
+
+impl OutputBuffer {
+    fn new(target_batch_size: usize, schema: Arc<Schema>) -> Result<Self> {
+        let arrays = new_arrays(&schema, target_batch_size)?;
+        Ok(Self {
+            arrays,
+            target_batch_size,
+            slots_available: target_batch_size,
+            schema,
+        })
+    }
+
+    fn output_and_reset(&mut self) -> Option<ArrowResult<RecordBatch>> {
+        if self.is_full() {
+            let result = make_batch(self.schema.clone(), output_arrays);
+            self.arrays = new_arrays(&self.schema, self.target_batch_size)?;
+            self.slots_available = self.target_batch_size;
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    fn append(&mut self, size: usize) {
+        assert!(size <= self.slots_available);
+        self.slots_available -= size;
+    }
+
+    #[inline]
+    fn is_full(&self) -> bool {
+        self.slots_available == 0
+    }
 }
 
 struct SortMergeJoinDriver {
@@ -413,7 +456,11 @@ macro_rules! repeat_n {
     ($TO:ty, $FROM:ty, $N:expr, $to: ident, $from: ident, $idx: ident) => {{
         let to = $to.as_mut_any().downcast_mut::<$TO>().unwrap();
         let from = $from.as_any().downcast_ref::<$FROM>().unwrap();
-        let repeat_iter = $from.slice($idx, 1).iter().flat_map(|v| repeat(v).take($N)).collect::<Vec<_>>();
+        let repeat_iter = from
+            .slice($idx, 1)
+            .iter()
+            .flat_map(|v| repeat(v).take($N))
+            .collect::<Vec<_>>();
         to.extend_trusted_len(repeat_iter.into_iter());
     }};
 }
@@ -446,26 +493,6 @@ fn repeat_streamed_cell(
         },
         PhysicalType::Utf8 => {
             repeat_n!(MutableUtf8Array<i32>, Utf8Array<i32>, times, to, from, idx)
-        }
-        PhysicalType::Binary => {
-            repeat_n!(
-                MutableBinaryArray<i32>,
-                BinaryArray<i32>,
-                times,
-                to,
-                from,
-                idx
-            )
-        }
-        PhysicalType::FixedSizeBinary => {
-            repeat_n!(
-                MutableFixedSizeBinaryArray,
-                FixedSizeBinaryArray,
-                times,
-                to,
-                from,
-                idx
-            )
         }
         _ => todo!(),
     }
@@ -543,26 +570,6 @@ fn copy_slices(
                 column_index
             )
         }
-        PhysicalType::Binary => {
-            copy_slices!(
-                MutableBinaryArray<i32>,
-                BinaryArray<i32>,
-                array,
-                batches,
-                slices,
-                column_index
-            )
-        }
-        PhysicalType::FixedSizeBinary => {
-            copy_slices!(
-                MutableFixedSizeBinaryArray,
-                FixedSizeBinaryArray,
-                array,
-                batches,
-                slices,
-                column_index
-            )
-        }
         _ => todo!(),
     }
 }
@@ -570,12 +577,10 @@ fn copy_slices(
 fn range_start_indices(buffered_ranges: &VecDeque<Range<usize>>) -> Vec<usize> {
     let mut idx = 0;
     let mut start_indices: Vec<usize> = vec![];
-    buffered_ranges
-        .iter()
-        .for_each(|r| {
-            start_indices.push(idx);
-            idx += range_len(r);
-        });
+    buffered_ranges.iter().for_each(|r| {
+        start_indices.push(idx);
+        idx += range_len(r);
+    });
     start_indices.push(usize::MAX);
     start_indices
 }
@@ -660,11 +665,6 @@ impl SortMergeJoinDriver {
         &mut self,
         sender: &Sender<ArrowResult<RecordBatch>>,
     ) -> Result<()> {
-        let target_batch_size = self.runtime.batch_size();
-
-        let mut output_slots_available = target_batch_size;
-        let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
-
         while self.find_next_inner_match().await? {
             loop {
                 let result = self

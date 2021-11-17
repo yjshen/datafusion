@@ -214,7 +214,29 @@ macro_rules! cmp_rows_elem {
             (false, false) => {
                 let cmp = left_array
                     .value($left)
-                    .partial_cmp(&right_array.value($right)).unwrap();
+                    .partial_cmp(&right_array.value($right))
+                    .unwrap();
+                if cmp != Ordering::Equal {
+                    $res = cmp;
+                    break;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }};
+}
+
+macro_rules! cmp_rows_elem_str {
+    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident, $res: ident) => {{
+        let left_array = $l.as_any().downcast_ref::<$array_type>().unwrap();
+        let right_array = $r.as_any().downcast_ref::<$array_type>().unwrap();
+
+        match (left_array.is_null($left), right_array.is_null($right)) {
+            (false, false) => {
+                let cmp = left_array
+                    .value($left)
+                    .partial_cmp(right_array.value($right))
+                    .unwrap();
                 if cmp != Ordering::Equal {
                     $res = cmp;
                     break;
@@ -248,9 +270,9 @@ fn comp_rows(
             DataType::Timestamp(_, None) => {
                 cmp_rows_elem!(Int64Array, l, r, left, right, res)
             }
-            DataType::Utf8 => cmp_rows_elem!(StringArray, l, r, left, right, res),
+            DataType::Utf8 => cmp_rows_elem_str!(StringArray, l, r, left, right, res),
             DataType::LargeUtf8 => {
-                cmp_rows_elem!(LargeStringArray, l, r, left, right, res)
+                cmp_rows_elem_str!(LargeStringArray, l, r, left, right, res)
             }
             _ => {
                 // This is internal because we should have caught this before.
