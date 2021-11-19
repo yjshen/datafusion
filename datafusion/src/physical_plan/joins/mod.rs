@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-mod smj_utils;
 pub mod cross_join;
 pub mod hash_join;
+mod smj_utils;
 pub mod sort_merge_join;
 
 use crate::error::{DataFusionError, Result};
