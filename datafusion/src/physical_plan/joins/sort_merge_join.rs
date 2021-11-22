@@ -255,6 +255,8 @@ struct BufferedBatches {
     /// Join on column
     on_column: Vec<Column>,
     sort: Vec<PhysicalSortExpr>,
+    /// last range's index in the last batch
+    range_idx: usize,
 }
 
 impl BufferedBatches {
@@ -267,6 +269,7 @@ impl BufferedBatches {
             next_key_batch: vec![],
             on_column,
             sort,
+            range_idx: 0,
         }
     }
 
@@ -313,6 +316,7 @@ impl BufferedBatches {
                 self.batches.push_back(prb.clone());
                 self.ranges.push_back(first_range.clone());
                 self.key_idx = Some(0);
+                self.range_idx = 0;
                 self.row_num += range_len;
                 Ok(single_range)
             }
@@ -323,6 +327,7 @@ impl BufferedBatches {
                 if equal {
                     self.batches.push_back(prb.clone());
                     self.ranges.push_back(first_range.clone());
+                    self.range_idx = 0;
                     self.row_num += range_len;
                     Ok(single_range)
                 } else {
@@ -356,18 +361,12 @@ impl BufferedBatches {
             self.ranges.drain(0..(self.batches.len() - 1));
         }
 
+        self.range_idx += 1;
         if let Some(batch) = self.batches.pop_back() {
             let tail_range = self.ranges.pop_back().unwrap();
-            let next_range_idx = batch
-                .ranges
-                .iter()
-                .enumerate()
-                .find(|(_, range)| range.start == tail_range.start)
-                .unwrap()
-                .0;
             self.key_idx = Some(tail_range.end);
-            self.ranges.push_back(batch.ranges[next_range_idx].clone());
-            self.row_num = batch.ranges[next_range_idx].len();
+            self.ranges.push_back(batch.ranges[self.range_idx].clone());
+            self.row_num = batch.ranges[self.range_idx].len();
             self.batches.push_back(batch);
         }
     }
@@ -1201,6 +1200,7 @@ impl SortMergeJoinDriver {
                         if batch.ranges.len() == 1 {
                             self.cumulate_same_keys().await?;
                         }
+                        self.buffered_batches.range_idx = 0;
                     }
                 }
             } else {
@@ -1210,6 +1210,7 @@ impl SortMergeJoinDriver {
                 if batch.ranges.len() == 1 {
                     self.cumulate_same_keys().await?;
                 }
+                self.buffered_batches.range_idx = 0;
             }
         } else {
             self.buffered_batches.advance_in_current_batch();
@@ -1217,21 +1218,22 @@ impl SortMergeJoinDriver {
                 .is_last_range(&self.buffered_batches.ranges[0])
             {
                 self.cumulate_same_keys().await?;
+                self.buffered_batches.range_idx = 0;
             }
         }
         Ok(false)
     }
 
     /// true for has next, false for buffer side ended
-    async fn cumulate_same_keys(&mut self) -> Result<bool> {
+    async fn cumulate_same_keys(&mut self) -> Result<()> {
         loop {
             let batch = self.get_buffered_next().await?;
             match batch {
-                None => return Ok(false),
+                None => return Ok(()),
                 Some(batch) => {
                     let more_batches = self.buffered_batches.running_key(&batch)?;
                     if !more_batches {
-                        return Ok(true);
+                        return Ok(());
                     }
                 }
             }
