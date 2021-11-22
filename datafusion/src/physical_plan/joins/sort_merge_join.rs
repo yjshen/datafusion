@@ -25,7 +25,7 @@ use std::{any::Any, usize};
 
 use arrow::array::*;
 use arrow::datatypes::*;
-use arrow::error::Result as ArrowResult;
+use arrow::error::{Result as ArrowResult, ArrowError};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -129,7 +129,7 @@ impl StreamingBatch {
         match &self.batch {
             None => return true,
             Some(batch) => {
-                for c in self.on_column {
+                for c in &self.on_column {
                     let array = batch.batch.column(c.index());
                     if array.is_null(self.cur_row) {
                         return true;
@@ -154,7 +154,7 @@ impl StreamingBatch {
         self.cur_row += 1;
         self.is_new_key = false;
         if !self.is_last_key_in_batch() {
-            let ranges = self.batch.unwrap().ranges;
+            let ranges = &self.batch.as_ref().unwrap().ranges;
             if self.cur_row == ranges[self.cur_range + 1].start {
                 self.cur_range += 1;
                 self.is_new_key = true;
@@ -165,7 +165,7 @@ impl StreamingBatch {
     }
 
     fn advance_key(&mut self) {
-        let ranges = self.batch.unwrap().ranges;
+        let ranges = &self.batch.as_ref().unwrap().ranges;
         self.cur_range += 1;
         self.cur_row = ranges[self.cur_range].start;
         self.is_new_key = true;
@@ -184,7 +184,7 @@ struct BufferedBatches {
     /// total number of rows for the current key
     row_num: usize,
     /// hold found but not currently used batch, to continue iteration
-    next_key_batch: Option<PartitionedRecordBatch>,
+    next_key_batch: Vec<PartitionedRecordBatch>,
     /// Join on column
     on_column: Vec<Column>,
     sort: Vec<PhysicalSortExpr>,
@@ -202,7 +202,7 @@ impl BufferedBatches {
             ranges: VecDeque::new(),
             key_idx: None,
             row_num: 0,
-            next_key_batch: None,
+            next_key_batch: vec![],
             on_column,
             sort,
         }
@@ -213,7 +213,7 @@ impl BufferedBatches {
             None => return true,
             Some(key_idx) => {
                 let first_batch = &self.batches[0].batch;
-                for c in self.on_column {
+                for c in &self.on_column {
                     let array = first_batch.column(c.index());
                     if array.is_null(*key_idx) {
                         return true;
@@ -241,7 +241,7 @@ impl BufferedBatches {
     /// Whether the running key ends at the current batch `prb`, true for continues, false for ends.
     fn running_key(&mut self, prb: &PartitionedRecordBatch) -> Result<bool> {
         let first_range = &prb.ranges[0];
-        let range_len = range_len(first_range);
+        let range_len = first_range.len();
         let current_batch = &prb.batch;
         let single_range = prb.ranges.len() == 1;
 
@@ -264,7 +264,7 @@ impl BufferedBatches {
                     self.row_num += range_len;
                     Ok(single_range)
                 } else {
-                    self.next_key_batch = Some(prb.clone());
+                    self.next_key_batch.push(prb.clone());
                     Ok(false) // running key ends
                 }
             }
@@ -274,7 +274,7 @@ impl BufferedBatches {
     fn cleanup(&mut self) {
         self.batches.drain(..);
         self.ranges.drain(..);
-        self.next_key_batch = None;
+        self.next_key_batch.drain(..);
     }
 
     fn reset_batch(&mut self, prb: &PartitionedRecordBatch) {
@@ -283,7 +283,7 @@ impl BufferedBatches {
         let first_range = &prb.ranges[0];
         self.ranges.push_back(first_range.clone());
         self.key_idx = Some(0);
-        self.row_num = range_len(first_range);
+        self.row_num = first_range.len();
     }
 
     /// Advance the cursor to the next key seen by this buffer
@@ -296,16 +296,17 @@ impl BufferedBatches {
 
         if let Some(batch) = self.batches.pop_back() {
             let tail_range = self.ranges.pop_back().unwrap();
-            self.batches.push_back(batch);
             let next_range_idx = batch
                 .ranges
                 .iter()
-                .find_position(|x| x.start == tail_range.start)
+                .enumerate()
+                .find(|(_, range)| range.start == tail_range.start)
                 .unwrap()
                 .0;
             self.key_idx = Some(tail_range.end);
             self.ranges.push_back(batch.ranges[next_range_idx].clone());
-            self.row_num = range_len(&batch.ranges[next_range_idx]);
+            self.row_num = batch.ranges[next_range_idx].len();
+            self.batches.push_back(batch);
         }
     }
 }
@@ -326,7 +327,8 @@ struct OutputBuffer {
 
 impl OutputBuffer {
     fn new(target_batch_size: usize, schema: Arc<Schema>) -> Result<Self> {
-        let arrays = new_arrays(&schema, target_batch_size)?;
+        let arrays = new_arrays(&schema, target_batch_size)
+            .map_err(DataFusionError::ArrowError)?;
         Ok(Self {
             arrays,
             target_batch_size,
@@ -335,15 +337,12 @@ impl OutputBuffer {
         })
     }
 
-    fn output_and_reset(&mut self) -> Option<ArrowResult<RecordBatch>> {
-        if self.is_full() {
-            let result = make_batch(self.schema.clone(), output_arrays);
-            self.arrays = new_arrays(&self.schema, self.target_batch_size)?;
-            self.slots_available = self.target_batch_size;
-            Some(result)
-        } else {
-            None
-        }
+    fn output_and_reset(&mut self) -> ArrowResult<RecordBatch> {
+        let result = make_batch(self.schema.clone(), self.arrays.drain(..).collect());
+        let mut new = new_arrays(&self.schema, self.target_batch_size)?;
+        self.arrays.append(&mut new);
+        self.slots_available = self.target_batch_size;
+        result
     }
 
     fn append(&mut self, size: usize) {
@@ -360,14 +359,13 @@ impl OutputBuffer {
 struct SortMergeJoinDriver {
     streamed: SendableRecordBatchStream,
     buffered: SendableRecordBatchStream,
-    on_streamed: Vec<Column>,
-    on_buffered: Vec<Column>,
     schema: Arc<Schema>,
     /// Information of index and left / right placement of columns
     column_indices: Vec<ColumnIndex>,
     stream_batch: StreamingBatch,
     buffered_batches: BufferedBatches,
     runtime: Arc<RuntimeEnv>,
+    output: OutputBuffer,
 }
 
 macro_rules! with_match_primitive_type {(
@@ -393,7 +391,7 @@ macro_rules! with_match_primitive_type {(
     }
 })}
 
-fn make_mutable(data_type: &DataType, capacity: usize) -> Result<Box<dyn MutableArray>> {
+fn make_mutable(data_type: &DataType, capacity: usize) -> ArrowResult<Box<dyn MutableArray>> {
     Ok(match data_type.to_physical_type() {
         PhysicalType::Boolean => Box::new(MutableBooleanArray::with_capacity(capacity))
             as Box<dyn MutableArray>,
@@ -419,11 +417,11 @@ fn make_mutable(data_type: &DataType, capacity: usize) -> Result<Box<dyn Mutable
             DataType::FixedSizeBinary(size) => Box::new(
                 MutableFixedSizeBinaryArray::with_capacity(*size as usize, capacity),
             ) as Box<dyn MutableArray>,
-            other => {
-                return Err(DataFusionError::Execution(format!(
+            _ => {
+                return Err(ArrowError::NotYetImplemented(format!(
                     "making mutable of type {} is not implemented yet",
                     data_type
-                )))
+                )));
             }
         },
     })
@@ -432,7 +430,7 @@ fn make_mutable(data_type: &DataType, capacity: usize) -> Result<Box<dyn Mutable
 fn new_arrays(
     schema: &Arc<Schema>,
     batch_size: usize,
-) -> Result<Vec<Box<dyn MutableArray>>> {
+) -> ArrowResult<Vec<Box<dyn MutableArray>>> {
     let arrays: Vec<Box<dyn MutableArray>> = schema
         .fields()
         .iter()
@@ -440,7 +438,7 @@ fn new_arrays(
             let dt = field.data_type.to_logical_type();
             make_mutable(dt, batch_size)
         })
-        .collect::<Result<_>>()?;
+        .collect::<ArrowResult<_>>()?;
     Ok(arrays)
 }
 
@@ -579,7 +577,7 @@ fn range_start_indices(buffered_ranges: &VecDeque<Range<usize>>) -> Vec<usize> {
     let mut start_indices: Vec<usize> = vec![];
     buffered_ranges.iter().for_each(|r| {
         start_indices.push(idx);
-        idx += range_len(r);
+        idx += r.len();
     });
     start_indices.push(usize::MAX);
     start_indices
@@ -598,15 +596,16 @@ fn slices_from_batches(
     let mut remaining = len;
     let find = start_indices
         .iter()
-        .find_position(|&&start_idx| start_idx >= idx)
+        .enumerate()
+        .find(|(_, start_idx)| **start_idx >= idx)
         .unwrap();
-    let mut batch_idx = if find.1 == idx { find.0 } else { find.0 - 1 };
+    let mut batch_idx = if *find.1 == idx { find.0 } else { find.0 - 1 };
 
     while remaining > 0 {
         let current_range = &buffered_ranges[batch_idx];
         let range_start_idx = start_indices[batch_idx];
         let start_idx = idx - range_start_idx + current_range.start;
-        let range_available = range_len(current_range) - (idx - range_start_idx);
+        let range_available = current_range.len() - (idx - range_start_idx);
 
         if range_available >= remaining {
             slices.push(Slice {
@@ -647,18 +646,18 @@ impl SortMergeJoinDriver {
         column_indices: Vec<ColumnIndex>,
         schema: Arc<Schema>,
         runtime: Arc<RuntimeEnv>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let batch_size = runtime.batch_size();
+        Ok(Self {
             streamed,
             buffered,
-            on_streamed,
-            on_buffered,
-            schema,
+            schema: schema.clone(),
             column_indices,
-            stream_batch: StreamingBatch::new(on_streamed.clone(), streamed_sort),
-            buffered_batches: BufferedBatches::new(on_buffered.clone(), buffered_sort),
+            stream_batch: StreamingBatch::new(on_streamed, streamed_sort),
+            buffered_batches: BufferedBatches::new(on_buffered, buffered_sort),
             runtime,
-        }
+            output: OutputBuffer::new(batch_size, schema)?,
+        })
     }
 
     async fn inner_join_driver(
@@ -667,17 +666,7 @@ impl SortMergeJoinDriver {
     ) -> Result<()> {
         while self.find_next_inner_match().await? {
             loop {
-                let result = self
-                    .join_eq_records(
-                        target_batch_size,
-                        output_slots_available,
-                        output_arrays,
-                        sender,
-                    )
-                    .await?;
-                output_slots_available = result.0;
-                output_arrays = result.1;
-
+                self.join_eq_records(sender).await?;
                 self.stream_batch.advance();
                 if self.stream_batch.is_new_key {
                     break;
@@ -692,24 +681,9 @@ impl SortMergeJoinDriver {
         &mut self,
         sender: &Sender<ArrowResult<RecordBatch>>,
     ) -> Result<()> {
-        let target_batch_size = self.runtime.batch_size();
-
-        let mut output_slots_available = target_batch_size;
-        let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
-
         while self.find_next_inner_match().await? {
-            let result = self
-                .stream_copy_buffer_omit(
-                    target_batch_size,
-                    output_slots_available,
-                    output_arrays,
-                    sender,
-                )
-                .await?;
-            output_slots_available = result.0;
-            output_arrays = result.1;
+            self.stream_copy_buffer_omit(sender).await?;
         }
-
         Ok(())
     }
 
@@ -717,10 +691,6 @@ impl SortMergeJoinDriver {
         &mut self,
         sender: &Sender<ArrowResult<RecordBatch>>,
     ) -> Result<()> {
-        let target_batch_size = self.runtime.batch_size();
-
-        let mut output_slots_available = target_batch_size;
-        let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
         let mut buffer_ends = false;
 
         loop {
@@ -735,33 +705,14 @@ impl SortMergeJoinDriver {
             buffer_ends = buffered_ended;
             if get_match {
                 loop {
-                    let result = self
-                        .join_eq_records(
-                            target_batch_size,
-                            output_slots_available,
-                            output_arrays,
-                            sender,
-                        )
-                        .await?;
-                    output_slots_available = result.0;
-                    output_arrays = result.1;
-
+                    self.join_eq_records(sender).await?;
                     self.stream_batch.advance();
                     if self.stream_batch.is_new_key {
                         break;
                     }
                 }
             } else {
-                let result = self
-                    .stream_copy_buffer_null(
-                        target_batch_size,
-                        output_slots_available,
-                        output_arrays,
-                        sender,
-                    )
-                    .await?;
-                output_slots_available = result.0;
-                output_arrays = result.1;
+                self.stream_copy_buffer_null(sender).await?;
             }
         }
 
@@ -772,10 +723,6 @@ impl SortMergeJoinDriver {
         &mut self,
         sender: &Sender<ArrowResult<RecordBatch>>,
     ) -> Result<()> {
-        let target_batch_size = self.runtime.batch_size();
-
-        let mut output_slots_available = target_batch_size;
-        let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
         let mut buffer_ends = false;
 
         loop {
@@ -783,7 +730,7 @@ impl SortMergeJoinDriver {
                 get_match,
                 buffered_ended,
                 more_output,
-            } = self.find_next_outer(buffer_ends)?;
+            } = self.find_next_outer(buffer_ends).await?;
             if !more_output {
                 break;
             }
@@ -791,16 +738,7 @@ impl SortMergeJoinDriver {
             if get_match {
                 // do nothing
             } else {
-                let result = self
-                    .stream_copy_buffer_omit(
-                        target_batch_size,
-                        output_slots_available,
-                        output_arrays,
-                        sender,
-                    )
-                    .await?;
-                output_slots_available = result.0;
-                output_arrays = result.1;
+                self.stream_copy_buffer_omit(sender).await?;
             }
         }
 
@@ -811,10 +749,6 @@ impl SortMergeJoinDriver {
         &mut self,
         sender: &Sender<ArrowResult<RecordBatch>>,
     ) -> Result<()> {
-        let target_batch_size = self.runtime.batch_size();
-
-        let mut output_slots_available = target_batch_size;
-        let mut output_arrays = new_arrays(&self.schema, target_batch_size)?;
         let mut stream_ends = false;
         let mut buffer_ends = false;
         let mut advance_stream = true;
@@ -831,62 +765,22 @@ impl SortMergeJoinDriver {
             if stream_ends && buffer_ends {
                 break;
             } else if stream_ends {
-                let result = self
-                    .stream_null_buffer_copy(
-                        target_batch_size,
-                        output_slots_available,
-                        output_arrays,
-                        sender,
-                    )
-                    .await?;
-                output_slots_available = result.0;
-                output_arrays = result.1;
-
+                self.stream_null_buffer_copy(sender).await?;
                 advance_buffer = true;
                 advance_stream = false;
             } else if buffer_ends {
-                let result = self
-                    .stream_copy_buffer_null(
-                        target_batch_size,
-                        output_slots_available,
-                        output_arrays,
-                        sender,
-                    )
-                    .await?;
-                output_slots_available = result.0;
-                output_arrays = result.1;
-
+                self.stream_copy_buffer_null(sender).await?;
                 advance_stream = true;
                 advance_buffer = false;
             } else {
                 if self.stream_batch.key_any_null() {
-                    let result = self
-                        .stream_copy_buffer_null(
-                            target_batch_size,
-                            output_slots_available,
-                            output_arrays,
-                            sender,
-                        )
-                        .await?;
-                    output_slots_available = result.0;
-                    output_arrays = result.1;
-
+                    self.stream_copy_buffer_null(sender).await?;
                     advance_stream = true;
                     advance_buffer = false;
                     continue;
                 }
                 if self.buffered_batches.key_any_null() {
-                    let result = self
-                        .stream_null_buffer_copy(
-                            target_batch_size,
-                            output_slots_available,
-                            output_arrays,
-                            sender,
-                        )
-                        .await?;
-                    output_slots_available = result.0;
-                    output_arrays = result.1;
-
+                    self.stream_null_buffer_copy(sender).await?;
                     advance_buffer = true;
                     advance_stream = false;
                     continue;
@@ -895,33 +789,13 @@ impl SortMergeJoinDriver {
                 let current_cmp = self.compare_stream_buffer()?;
                 match current_cmp {
                     Ordering::Less => {
-                        let result = self
-                            .stream_copy_buffer_null(
-                                target_batch_size,
-                                output_slots_available,
-                                output_arrays,
-                                sender,
-                            )
-                            .await?;
-                        output_slots_available = result.0;
-                        output_arrays = result.1;
-
+                        self.stream_copy_buffer_null(sender).await?;
                         advance_stream = true;
                         advance_buffer = false;
                     }
                     Ordering::Equal => {
                         loop {
-                            let result = self
-                                .join_eq_records(
-                                    target_batch_size,
-                                    output_slots_available,
-                                    output_arrays,
-                                    sender,
-                                )
-                                .await?;
-                            output_slots_available = result.0;
-                            output_arrays = result.1;
-
+                            self.join_eq_records(sender).await?;
                             self.stream_batch.advance();
                             if self.stream_batch.is_new_key {
                                 break;
@@ -931,17 +805,7 @@ impl SortMergeJoinDriver {
                         advance_buffer = true;
                     }
                     Ordering::Greater => {
-                        let result = self
-                            .stream_null_buffer_copy(
-                                target_batch_size,
-                                output_slots_available,
-                                output_arrays,
-                                sender,
-                            )
-                            .await?;
-                        output_slots_available = result.0;
-                        output_arrays = result.1;
-
+                        self.stream_null_buffer_copy(sender).await?;
                         advance_buffer = true;
                         advance_stream = false;
                     }
@@ -953,14 +817,10 @@ impl SortMergeJoinDriver {
 
     async fn join_eq_records(
         &mut self,
-        target_batch_size: usize,
-        output_slots_available: usize,
-        mut output_arrays: Vec<Box<dyn MutableArray>>,
         sender: &Sender<ArrowResult<RecordBatch>>,
-    ) -> Result<(usize, Vec<Box<dyn MutableArray>>)> {
-        let mut output_slots_available = output_slots_available;
+    ) -> Result<()> {
         let mut remaining = self.buffered_batches.row_num;
-        let stream_batch = &self.stream_batch.batch.unwrap().batch;
+        let stream_batch = &self.stream_batch.batch.as_ref().unwrap().batch;
         let stream_row = self.stream_batch.cur_row;
 
         let batches = self
@@ -973,21 +833,18 @@ impl SortMergeJoinDriver {
 
         let mut unfinished = true;
         let mut buffered_idx = 0;
-        let mut rows_to_output = 0;
         let start_indices = range_start_indices(buffered_ranges);
 
         // output each buffered matching record once
         while unfinished {
-            if output_slots_available >= remaining {
+            let output_slots_available = self.output.slots_available;
+            let rows_to_output = if output_slots_available >= remaining {
                 unfinished = false;
-                rows_to_output = remaining;
-                output_slots_available -= remaining;
-                remaining = 0;
+                remaining
             } else {
-                rows_to_output = output_slots_available;
-                output_slots_available = 0;
-                remaining -= rows_to_output;
-            }
+                remaining -= output_slots_available;
+                output_slots_available
+            };
 
             // get slices for buffered side for the current output
             let slices = slices_from_batches(
@@ -997,11 +854,11 @@ impl SortMergeJoinDriver {
                 rows_to_output,
             );
 
-            output_arrays
+            self.output
+                .arrays
                 .iter_mut()
-                .zip(self.schema.fields().iter())
                 .zip(self.column_indices.iter())
-                .map(|((array, field), column_index)| {
+                .map(|(array, column_index)| {
                     if column_index.is_left {
                         // repeat streamed `rows_to_output` times
                         repeat_streamed_cell(
@@ -1017,53 +874,42 @@ impl SortMergeJoinDriver {
                     }
                 });
 
-            if output_slots_available == 0 {
-                let result = make_batch(self.schema.clone(), output_arrays);
+            self.output.append(rows_to_output);
+            buffered_idx += rows_to_output;
 
+            if self.output.is_full() {
+                let result = self.output.output_and_reset();
                 if let Err(e) = sender.send(result).await {
                     println!("ERROR batch via inner join stream: {}", e);
                 };
-
-                output_arrays = new_arrays(&self.schema, target_batch_size)?;
-                output_slots_available = target_batch_size;
             }
-
-            buffered_idx += rows_to_output;
-            rows_to_output = 0;
         }
-        Ok((output_slots_available, output_arrays))
+        Ok(())
     }
 
     async fn stream_copy_buffer_null(
         &mut self,
-        target_batch_size: usize,
-        output_slots_available: usize,
-        mut output_arrays: Vec<Box<dyn MutableArray>>,
         sender: &Sender<ArrowResult<RecordBatch>>,
-    ) -> Result<(usize, Vec<Box<dyn MutableArray>>)> {
-        let mut output_slots_available = output_slots_available;
-        let stream_batch = &self.stream_batch.batch.unwrap().batch;
+    ) -> Result<()> {
+        let stream_batch = &self.stream_batch.batch.as_ref().unwrap().batch;
         let batch = vec![stream_batch];
         let stream_range =
-            &self.stream_batch.batch.unwrap().ranges[&self.stream_batch.cur_range];
-        let mut remaining = range_len(stream_range);
+            &self.stream_batch.batch.as_ref().unwrap().ranges[self.stream_batch.cur_range];
+        let mut remaining = stream_range.len();
 
         let mut unfinished = true;
         let mut streamed_idx = self.stream_batch.cur_row;
-        let mut rows_to_output = 0;
 
         // output each buffered matching record once
         while unfinished {
-            if output_slots_available >= remaining {
+            let output_slots_available = self.output.slots_available;
+            let rows_to_output = if output_slots_available >= remaining {
                 unfinished = false;
-                rows_to_output = remaining;
-                output_slots_available -= remaining;
-                remaining = 0;
+                remaining
             } else {
-                rows_to_output = output_slots_available;
-                output_slots_available = 0;
-                remaining -= rows_to_output;
-            }
+                remaining -= output_slots_available;
+                output_slots_available
+            };
 
             let slice = vec![Slice {
                 batch_idx: 0,
@@ -1071,11 +917,11 @@ impl SortMergeJoinDriver {
                 len: rows_to_output,
             }];
 
-            output_arrays
+            self.output
+                .arrays
                 .iter_mut()
-                .zip(self.schema.fields().iter())
                 .zip(self.column_indices.iter())
-                .map(|((array, field), column_index)| {
+                .map(|(array, column_index)| {
                     if column_index.is_left {
                         copy_slices(&batch, &slice, array, column_index);
                     } else {
@@ -1083,53 +929,42 @@ impl SortMergeJoinDriver {
                     }
                 });
 
-            if output_slots_available == 0 {
-                let result = make_batch(self.schema.clone(), output_arrays);
-
-                if let Err(e) = sender.send(result).await {
-                    println!("ERROR batch via inner join stream: {}", e);
-                };
-
-                output_arrays = new_arrays(&self.schema, target_batch_size)?;
-                output_slots_available = target_batch_size;
-            }
-
+            self.output.append(rows_to_output);
             streamed_idx += rows_to_output;
-            rows_to_output = 0;
+
+            if self.output.is_full() {
+                let result = self.output.output_and_reset();
+                if let Err(e) = sender.send(result).await {
+                    println!("ERROR batch via outer join stream: {}", e);
+                };
+            }
         }
-        Ok((output_slots_available, output_arrays))
+        Ok(())
     }
 
     async fn stream_copy_buffer_omit(
         &mut self,
-        target_batch_size: usize,
-        output_slots_available: usize,
-        mut output_arrays: Vec<Box<dyn MutableArray>>,
         sender: &Sender<ArrowResult<RecordBatch>>,
-    ) -> Result<(usize, Vec<Box<dyn MutableArray>>)> {
-        let mut output_slots_available = output_slots_available;
-        let stream_batch = &self.stream_batch.batch.unwrap().batch;
+    ) -> Result<()> {
+        let stream_batch = &self.stream_batch.batch.as_ref().unwrap().batch;
         let batch = vec![stream_batch];
         let stream_range =
-            &self.stream_batch.batch.unwrap().ranges[&self.stream_batch.cur_range];
-        let mut remaining = range_len(stream_range);
+            &self.stream_batch.batch.as_ref().unwrap().ranges[self.stream_batch.cur_range];
+        let mut remaining = stream_range.len();
 
         let mut unfinished = true;
         let mut streamed_idx = self.stream_batch.cur_row;
-        let mut rows_to_output = 0;
 
         // output each buffered matching record once
         while unfinished {
-            if output_slots_available >= remaining {
+            let output_slots_available = self.output.slots_available;
+            let rows_to_output = if output_slots_available >= remaining {
                 unfinished = false;
-                rows_to_output = remaining;
-                output_slots_available -= remaining;
-                remaining = 0;
+                remaining
             } else {
-                rows_to_output = output_slots_available;
-                output_slots_available = 0;
-                remaining -= rows_to_output;
-            }
+                remaining -= output_slots_available;
+                output_slots_available
+            };
 
             let slice = vec![Slice {
                 batch_idx: 0,
@@ -1137,39 +972,31 @@ impl SortMergeJoinDriver {
                 len: rows_to_output,
             }];
 
-            output_arrays
+            self.output
+                .arrays
                 .iter_mut()
-                .zip(self.schema.fields().iter())
                 .zip(self.column_indices.iter())
-                .map(|((array, field), column_index)| {
+                .map(|(array, column_index)| {
                     copy_slices(&batch, &slice, array, column_index);
                 });
 
-            if output_slots_available == 0 {
-                let result = make_batch(self.schema.clone(), output_arrays);
-
-                if let Err(e) = sender.send(result).await {
-                    println!("ERROR batch via inner join stream: {}", e);
-                };
-
-                output_arrays = new_arrays(&self.schema, target_batch_size)?;
-                output_slots_available = target_batch_size;
-            }
-
+            self.output.append(rows_to_output);
             streamed_idx += rows_to_output;
-            rows_to_output = 0;
+
+            if self.output.is_full() {
+                let result = self.output.output_and_reset();
+                if let Err(e) = sender.send(result).await {
+                    println!("ERROR batch via semi/anti join stream: {}", e);
+                };
+            }
         }
-        Ok((output_slots_available, output_arrays))
+        Ok(())
     }
 
     async fn stream_null_buffer_copy(
         &mut self,
-        target_batch_size: usize,
-        output_slots_available: usize,
-        mut output_arrays: Vec<Box<dyn MutableArray>>,
         sender: &Sender<ArrowResult<RecordBatch>>,
-    ) -> Result<(usize, Vec<Box<dyn MutableArray>>)> {
-        let mut output_slots_available = output_slots_available;
+    ) -> Result<()> {
         let mut remaining = self.buffered_batches.row_num;
 
         let batches = self
@@ -1182,21 +1009,18 @@ impl SortMergeJoinDriver {
 
         let mut unfinished = true;
         let mut buffered_idx = 0;
-        let mut rows_to_output = 0;
         let start_indices = range_start_indices(buffered_ranges);
 
         // output each buffered matching record once
         while unfinished {
-            if output_slots_available >= remaining {
+            let output_slots_available = self.output.slots_available;
+            let rows_to_output = if output_slots_available >= remaining {
                 unfinished = false;
-                rows_to_output = remaining;
-                output_slots_available -= remaining;
-                remaining = 0;
+                remaining
             } else {
-                rows_to_output = output_slots_available;
-                output_slots_available = 0;
-                remaining -= rows_to_output;
-            }
+                remaining -= output_slots_available;
+                output_slots_available
+            };
 
             // get slices for buffered side for the current output
             let slices = slices_from_batches(
@@ -1206,11 +1030,11 @@ impl SortMergeJoinDriver {
                 rows_to_output,
             );
 
-            output_arrays
+            self.output
+                .arrays
                 .iter_mut()
-                .zip(self.schema.fields().iter())
                 .zip(self.column_indices.iter())
-                .map(|((array, field), column_index)| {
+                .map(|(array, column_index)| {
                     if column_index.is_left {
                         (0..rows_to_output).for_each(|_| array.push_null());
                     } else {
@@ -1219,21 +1043,17 @@ impl SortMergeJoinDriver {
                     }
                 });
 
-            if output_slots_available == 0 {
-                let result = make_batch(self.schema.clone(), output_arrays);
-
-                if let Err(e) = sender.send(result).await {
-                    println!("ERROR batch via inner join stream: {}", e);
-                };
-
-                output_arrays = new_arrays(&self.schema, target_batch_size)?;
-                output_slots_available = target_batch_size;
-            }
-
+            self.output.append(rows_to_output);
             buffered_idx += rows_to_output;
-            rows_to_output = 0;
+
+            if self.output.is_full() {
+                let result = self.output.output_and_reset();
+                if let Err(e) = sender.send(result).await {
+                    println!("ERROR batch via outer join stream: {}", e);
+                };
+            }
         }
-        Ok((output_slots_available, output_arrays))
+        Ok(())
     }
 
     async fn find_next_inner_match(&mut self) -> Result<bool> {
@@ -1389,24 +1209,23 @@ impl SortMergeJoinDriver {
     /// true for has next, false for ended
     async fn advance_buffered_key(&mut self) -> Result<bool> {
         if self.buffered_batches.is_finished()? {
-            match &self.buffered_batches.next_key_batch {
-                None => {
-                    let batch = self.get_buffered_next().await?;
-                    match batch {
-                        None => return Ok(false),
-                        Some(batch) => {
-                            self.buffered_batches.reset_batch(&batch);
-                            if batch.ranges.len() == 1 {
-                                self.cumulate_same_keys().await?;
-                            }
+            if self.buffered_batches.next_key_batch.is_empty() {
+                let batch = self.get_buffered_next().await?;
+                match batch {
+                    None => return Ok(false),
+                    Some(batch) => {
+                        self.buffered_batches.reset_batch(&batch);
+                        if batch.ranges.len() == 1 {
+                            self.cumulate_same_keys().await?;
                         }
                     }
                 }
-                Some(batch) => {
-                    self.buffered_batches.reset_batch(batch);
-                    if batch.ranges.len() == 1 {
-                        self.cumulate_same_keys().await?;
-                    }
+            } else {
+                assert_eq!(self.buffered_batches.next_key_batch.len(), 1);
+                let batch = self.buffered_batches.next_key_batch.pop().unwrap();
+                self.buffered_batches.reset_batch(&batch);
+                if batch.ranges.len() == 1 {
+                    self.cumulate_same_keys().await?;
                 }
             }
         } else {
@@ -1422,16 +1241,15 @@ impl SortMergeJoinDriver {
 
     /// true for has next, false for buffer side ended
     async fn cumulate_same_keys(&mut self) -> Result<bool> {
-        let batch = self.get_buffered_next().await?;
-        match batch {
-            None => Ok(false),
-            Some(batch) => {
-                let more_batches = self.buffered_batches.running_key(&batch)?;
-                if more_batches {
-                    self.cumulate_same_keys().await
-                } else {
-                    // reach end of current key, but the stream continues
-                    Ok(true)
+        loop {
+            let batch = self.get_buffered_next().await?;
+            match batch {
+                None => return Ok(false),
+                Some(batch) => {
+                    let more_batches = self.buffered_batches.running_key(&batch)?;
+                    if !more_batches {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -1439,9 +1257,9 @@ impl SortMergeJoinDriver {
 
     fn compare_stream_buffer(&self) -> Result<Ordering> {
         let stream_arrays =
-            join_arrays(&self.stream_batch.batch.unwrap().batch, &self.on_streamed);
+            join_arrays(&self.stream_batch.batch.as_ref().unwrap().batch, &self.stream_batch.on_column);
         let buffer_arrays =
-            join_arrays(&self.buffered_batches.batches[0].batch, &self.on_buffered);
+            join_arrays(&self.buffered_batches.batches[0].batch, &self.buffered_batches.on_column);
         comp_rows(
             self.stream_batch.cur_row,
             self.buffered_batches.key_idx.unwrap(),
@@ -1660,7 +1478,7 @@ impl ExecutionPlan for SortMergeJoinExec {
                 column_indices,
                 self.schema.clone(),
                 RUNTIME_ENV.clone(),
-            ),
+            )?,
             JoinType::Right => SortMergeJoinDriver::new(
                 right,
                 left,
@@ -1671,7 +1489,7 @@ impl ExecutionPlan for SortMergeJoinExec {
                 column_indices,
                 self.schema.clone(),
                 RUNTIME_ENV.clone(),
-            ),
+            )?,
         };
 
         match self.join_type {
