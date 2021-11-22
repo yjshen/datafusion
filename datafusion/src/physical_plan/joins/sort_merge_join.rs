@@ -56,9 +56,6 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-type StringArray = Utf8Array<i32>;
-type LargeStringArray = Utf8Array<i64>;
-
 #[derive(Clone)]
 struct PartitionedRecordBatch {
     batch: RecordBatch,
@@ -188,11 +185,6 @@ struct BufferedBatches {
     /// Join on column
     on_column: Vec<Column>,
     sort: Vec<PhysicalSortExpr>,
-}
-
-#[inline]
-fn range_len(range: &Range<usize>) -> usize {
-    range.end - range.start
 }
 
 impl BufferedBatches {
@@ -359,12 +351,10 @@ impl OutputBuffer {
 struct SortMergeJoinDriver {
     streamed: SendableRecordBatchStream,
     buffered: SendableRecordBatchStream,
-    schema: Arc<Schema>,
     /// Information of index and left / right placement of columns
     column_indices: Vec<ColumnIndex>,
     stream_batch: StreamingBatch,
     buffered_batches: BufferedBatches,
-    runtime: Arc<RuntimeEnv>,
     output: OutputBuffer,
 }
 
@@ -453,9 +443,8 @@ fn make_batch(
 macro_rules! repeat_n {
     ($TO:ty, $FROM:ty, $N:expr, $to: ident, $from: ident, $idx: ident) => {{
         let to = $to.as_mut_any().downcast_mut::<$TO>().unwrap();
-        let from = $from.as_any().downcast_ref::<$FROM>().unwrap();
+        let from = $from.as_any().downcast_ref::<$FROM>().unwrap().slice($idx, 1);
         let repeat_iter = from
-            .slice($idx, 1)
             .iter()
             .flat_map(|v| repeat(v).take($N))
             .collect::<Vec<_>>();
@@ -651,11 +640,9 @@ impl SortMergeJoinDriver {
         Ok(Self {
             streamed,
             buffered,
-            schema: schema.clone(),
             column_indices,
             stream_batch: StreamingBatch::new(on_streamed, streamed_sort),
             buffered_batches: BufferedBatches::new(on_buffered, buffered_sort),
-            runtime,
             output: OutputBuffer::new(batch_size, schema)?,
         })
     }
@@ -858,7 +845,7 @@ impl SortMergeJoinDriver {
                 .arrays
                 .iter_mut()
                 .zip(self.column_indices.iter())
-                .map(|(array, column_index)| {
+                .for_each(|(array, column_index)| {
                     if column_index.is_left {
                         // repeat streamed `rows_to_output` times
                         repeat_streamed_cell(
@@ -921,7 +908,7 @@ impl SortMergeJoinDriver {
                 .arrays
                 .iter_mut()
                 .zip(self.column_indices.iter())
-                .map(|(array, column_index)| {
+                .for_each(|(array, column_index)| {
                     if column_index.is_left {
                         copy_slices(&batch, &slice, array, column_index);
                     } else {
@@ -976,7 +963,7 @@ impl SortMergeJoinDriver {
                 .arrays
                 .iter_mut()
                 .zip(self.column_indices.iter())
-                .map(|(array, column_index)| {
+                .for_each(|(array, column_index)| {
                     copy_slices(&batch, &slice, array, column_index);
                 });
 
@@ -1034,7 +1021,7 @@ impl SortMergeJoinDriver {
                 .arrays
                 .iter_mut()
                 .zip(self.column_indices.iter())
-                .map(|(array, column_index)| {
+                .for_each(|(array, column_index)| {
                     if column_index.is_left {
                         (0..rows_to_output).for_each(|_| array.push_null());
                     } else {
@@ -1156,17 +1143,6 @@ impl SortMergeJoinDriver {
                     }
                 }
             }
-        }
-    }
-
-    /// true for has next, false for ended
-    async fn advance_streamed(&mut self) -> Result<bool> {
-        if self.stream_batch.is_finished() {
-            self.get_stream_next().await?;
-            Ok(!self.stream_batch.is_finished())
-        } else {
-            self.stream_batch.advance();
-            Ok(true)
         }
     }
 
@@ -1321,6 +1297,7 @@ struct SortMergeJoinMetrics {
 }
 
 impl SortMergeJoinMetrics {
+    #[allow(dead_code)]
     pub fn new(partition: usize, metrics: &ExecutionPlanMetricsSet) -> Self {
         let join_time = MetricBuilder::new(metrics).subset_time("join_time", partition);
 

@@ -55,9 +55,6 @@ use crate::physical_plan::{
     SendableRecordBatchStream,
 };
 
-type StringArray = Utf8Array<i32>;
-type LargeStringArray = Utf8Array<i64>;
-
 // Maps a `u64` hash value based on the left ["on" values] to a list of indices with this key's value.
 //
 // Note that the `u64` keys are not stored in the hashmap (hence the `()` as key), but are only used

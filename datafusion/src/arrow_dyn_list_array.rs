@@ -58,11 +58,13 @@ impl<O: Offset> DynMutableListArray<O> {
     }
 
     /// The values
+    #[allow(dead_code)]
     pub fn mut_values(&mut self) -> &mut dyn MutableArray {
         self.values.as_mut()
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn try_push_valid(&mut self) -> Result<(), ArrowError> {
         let size = self.values.len();
         let size = O::from_usize(size).ok_or(ArrowError::KeyOverflowError)?; // todo: make this error

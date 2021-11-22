@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! Various join implementations.
+
 pub mod cross_join;
 pub mod hash_join;
 pub mod sort_merge_join;
@@ -111,7 +113,7 @@ pub fn build_join_schema(left: &Schema, right: &Schema, join_type: &JoinType) ->
 }
 
 /// Information about the index and placement (left or right) of the columns
-struct ColumnIndex {
+pub(crate) struct ColumnIndex {
     /// Index of the column
     index: usize,
     /// Whether the column is at the left or right side
@@ -119,7 +121,7 @@ struct ColumnIndex {
 }
 
 /// Calculates column indices and left/right placement on input / output schemas and jointype
-pub fn column_indices_from_schema(
+pub(crate) fn column_indices_from_schema(
     join_type: &JoinType,
     left_schema: &Arc<Schema>,
     right_schema: &Arc<Schema>,
@@ -288,10 +290,6 @@ fn comp_rows(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arrow::array::TryExtend;
-    use arrow::array::{MutableDictionaryArray, MutableUtf8Array};
 
     use crate::physical_plan::joins::check_join_set_is_valid;
 
