@@ -36,9 +36,11 @@ use datafusion::logical_plan::{
     window_frames::WindowFrame, DFSchema, Expr, JoinConstraint, JoinType,
 };
 use datafusion::physical_plan::aggregates::{create_aggregate_expr, AggregateFunction};
+use datafusion::physical_plan::aggregations::hash_aggregate::{
+    AggregateMode, HashAggregateExec,
+};
 use datafusion::physical_plan::avro::{AvroExec, AvroReadOptions};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::hash_aggregate::{AggregateMode, HashAggregateExec};
 use datafusion::physical_plan::joins::cross_join::CrossJoinExec;
 use datafusion::physical_plan::joins::hash_join::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;

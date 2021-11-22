@@ -609,6 +609,7 @@ pub trait Accumulator: Send + Sync + Debug {
 }
 
 pub mod aggregates;
+pub mod aggregations;
 pub mod analyze;
 pub mod array_expressions;
 pub mod avro;
@@ -626,7 +627,6 @@ pub mod explain;
 pub mod expressions;
 pub mod filter;
 pub mod functions;
-pub mod hash_aggregate;
 pub mod hash_utils;
 pub mod joins;
 pub mod json;

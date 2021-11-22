@@ -27,6 +27,7 @@ use std::{
 };
 
 use datafusion::logical_plan::JoinType;
+use datafusion::physical_plan::aggregations::hash_aggregate::AggregateMode;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::csv::CsvExec;
 use datafusion::physical_plan::expressions::{
@@ -34,7 +35,6 @@ use datafusion::physical_plan::expressions::{
 };
 use datafusion::physical_plan::expressions::{CastExpr, TryCastExpr};
 use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::hash_aggregate::AggregateMode;
 use datafusion::physical_plan::joins::cross_join::CrossJoinExec;
 use datafusion::physical_plan::joins::hash_join::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
@@ -53,7 +53,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::physical_plan::{AggregateExpr, ExecutionPlan, PhysicalExpr};
 
-use datafusion::physical_plan::hash_aggregate::HashAggregateExec;
+use datafusion::physical_plan::aggregations::hash_aggregate::HashAggregateExec;
 use protobuf::physical_plan_node::PhysicalPlanType;
 
 use crate::execution_plans::{

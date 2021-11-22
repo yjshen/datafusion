@@ -2404,7 +2404,7 @@ async fn explain_analyze_baseline_metrics() {
         use datafusion::physical_plan;
 
         plan.as_any().downcast_ref::<physical_plan::sorts::sort::SortExec>().is_some()
-            || plan.as_any().downcast_ref::<physical_plan::hash_aggregate::HashAggregateExec>().is_some()
+            || plan.as_any().downcast_ref::<physical_plan::aggregations::hash_aggregate::HashAggregateExec>().is_some()
             // CoalescePartitionsExec doesn't do any work so is not included
             || plan.as_any().downcast_ref::<physical_plan::filter::FilterExec>().is_some()
             || plan.as_any().downcast_ref::<physical_plan::projection::ProjectionExec>().is_some()

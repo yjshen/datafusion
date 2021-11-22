@@ -22,7 +22,7 @@ use arrow::datatypes::Schema;
 
 use crate::execution::context::ExecutionConfig;
 use crate::physical_plan::empty::EmptyExec;
-use crate::physical_plan::hash_aggregate::{AggregateMode, HashAggregateExec};
+use crate::physical_plan::aggregations::hash_aggregate::{AggregateMode, HashAggregateExec};
 use crate::physical_plan::projection::ProjectionExec;
 use crate::physical_plan::{
     expressions, AggregateExpr, ColumnStatistics, ExecutionPlan, Statistics,
@@ -224,7 +224,7 @@ mod tests {
     use crate::physical_plan::common;
     use crate::physical_plan::expressions::Count;
     use crate::physical_plan::filter::FilterExec;
-    use crate::physical_plan::hash_aggregate::HashAggregateExec;
+   use crate::physical_plan::aggregations::hash_aggregate::HashAggregateExec;
     use crate::physical_plan::memory::MemoryExec;
 
     /// Mock data using a MemoryExec which has an exact count statistic

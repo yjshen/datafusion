@@ -51,31 +51,19 @@ use pin_project_lite::pin_project;
 
 use async_trait::async_trait;
 
-use super::metrics::{
+use crate::physical_plan::metrics::{
     self, BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
-use super::Statistics;
-use super::{expressions::Column, RecordBatchStream, SendableRecordBatchStream};
+use crate::physical_plan::Statistics;
+use crate::physical_plan::{
+    expressions::Column, RecordBatchStream, SendableRecordBatchStream,
+};
+use crate::physical_plan::aggregations::{AggregateMode, create_schema};
 
-/// Hash aggregate modes
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum AggregateMode {
-    /// Partial aggregate that can be applied in parallel across input partitions
-    Partial,
-    /// Final aggregate that produces a single partition of output
-    Final,
-    /// Final aggregate that works on pre-partitioned data.
-    ///
-    /// This requires the invariant that all rows with a particular
-    /// grouping key are in the same partitions, such as is the case
-    /// with Hash repartitioning on the group keys. If a group key is
-    /// duplicated, duplicate groups would be produced
-    FinalPartitioned,
-}
 
 /// Hash aggregate execution plan
 #[derive(Debug)]
-pub struct HashAggregateExec {
+pub struct SortAggregateExec {
     /// Aggregation mode (full, partial)
     mode: AggregateMode,
     /// Grouping expressions
@@ -94,40 +82,7 @@ pub struct HashAggregateExec {
     metrics: ExecutionPlanMetricsSet,
 }
 
-fn create_schema(
-    input_schema: &Schema,
-    group_expr: &[(Arc<dyn PhysicalExpr>, String)],
-    aggr_expr: &[Arc<dyn AggregateExpr>],
-    mode: AggregateMode,
-) -> Result<Schema> {
-    let mut fields = Vec::with_capacity(group_expr.len() + aggr_expr.len());
-    for (expr, name) in group_expr {
-        fields.push(Field::new(
-            name,
-            expr.data_type(input_schema)?,
-            expr.nullable(input_schema)?,
-        ))
-    }
-
-    match mode {
-        AggregateMode::Partial => {
-            // in partial mode, the fields of the accumulator's state
-            for expr in aggr_expr {
-                fields.extend(expr.state_fields()?.iter().cloned())
-            }
-        }
-        AggregateMode::Final | AggregateMode::FinalPartitioned => {
-            // in final mode, the field with the final result of the accumulator
-            for expr in aggr_expr {
-                fields.push(expr.field()?)
-            }
-        }
-    }
-
-    Ok(Schema::new(fields))
-}
-
-impl HashAggregateExec {
+impl SortAggregateExec {
     /// Create a new hash aggregate execution plan
     pub fn try_new(
         mode: AggregateMode,
@@ -140,7 +95,7 @@ impl HashAggregateExec {
 
         let schema = Arc::new(schema);
 
-        Ok(HashAggregateExec {
+        Ok(SortAggregateExec {
             mode,
             group_expr,
             aggr_expr,
@@ -178,7 +133,7 @@ impl HashAggregateExec {
 }
 
 #[async_trait]
-impl ExecutionPlan for HashAggregateExec {
+impl ExecutionPlan for SortAggregateExec {
     /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self
@@ -216,7 +171,7 @@ impl ExecutionPlan for HashAggregateExec {
         let streamer_id = MemoryConsumerId::new(partition);
 
         if self.group_expr.is_empty() {
-            Ok(Box::pin(HashAggregateStream::new(
+            Ok(Box::pin(NoSortAggregateStream::new(
                 streamer_id,
                 self.mode,
                 self.schema.clone(),
@@ -225,7 +180,7 @@ impl ExecutionPlan for HashAggregateExec {
                 baseline_metrics,
             )))
         } else {
-            Ok(Box::pin(GroupedHashAggregateStream::new(
+            Ok(Box::pin(SortAggregateStream::new(
                 self.mode,
                 self.schema.clone(),
                 group_expr,
@@ -241,7 +196,7 @@ impl ExecutionPlan for HashAggregateExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         match children.len() {
-            1 => Ok(Arc::new(HashAggregateExec::try_new(
+            1 => Ok(Arc::new(SortAggregateExec::try_new(
                 self.mode,
                 self.group_expr.clone(),
                 self.aggr_expr.clone(),
@@ -299,14 +254,14 @@ impl ExecutionPlan for HashAggregateExec {
         // - aggregations somtimes also preserve invariants such as min, max...
         match self.mode {
             AggregateMode::Final | AggregateMode::FinalPartitioned
-                if self.group_expr.is_empty() =>
-            {
-                Statistics {
-                    num_rows: Some(1),
-                    is_exact: true,
-                    ..Default::default()
+            if self.group_expr.is_empty() =>
+                {
+                    Statistics {
+                        num_rows: Some(1),
+                        is_exact: true,
+                        ..Default::default()
+                    }
                 }
-            }
             _ => Statistics::default(),
         }
     }
@@ -338,7 +293,7 @@ Example: average
 * Finally, `get_value` returns an array with one entry computed from the state
 */
 pin_project! {
-    struct GroupedHashAggregateStream {
+    struct SortAggregateStream {
         schema: SchemaRef,
         #[pin]
         output: futures::channel::oneshot::Receiver<ArrowResult<RecordBatch>>,
@@ -539,7 +494,7 @@ async fn compute_grouped_hash_aggregate(
             accumulators,
             &aggregate_expressions,
         )
-        .map_err(DataFusionError::into_arrow_external_error)?;
+            .map_err(DataFusionError::into_arrow_external_error)?;
         timer.done();
     }
 
@@ -549,8 +504,8 @@ async fn compute_grouped_hash_aggregate(
     batch
 }
 
-impl GroupedHashAggregateStream {
-    /// Create a new HashAggregateStream
+impl SortAggregateStream {
+    /// Create a new SortAggregateStream
     pub fn new(
         mode: AggregateMode,
         schema: SchemaRef,
@@ -572,12 +527,12 @@ impl GroupedHashAggregateStream {
                 input,
                 elapsed_compute,
             )
-            .await
-            .record_output(&baseline_metrics);
+                .await
+                .record_output(&baseline_metrics);
             tx.send(result)
         });
 
-        GroupedHashAggregateStream {
+        SortAggregateStream {
             schema,
             output: rx,
             finished: false,
@@ -628,7 +583,7 @@ impl std::fmt::Debug for Accumulators {
     }
 }
 
-impl Stream for GroupedHashAggregateStream {
+impl Stream for SortAggregateStream {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(
@@ -660,7 +615,7 @@ impl Stream for GroupedHashAggregateStream {
     }
 }
 
-impl RecordBatchStream for GroupedHashAggregateStream {
+impl RecordBatchStream for SortAggregateStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -734,7 +689,7 @@ fn aggregate_expressions(
 }
 
 pin_project! {
-    struct HashAggregateStream {
+    struct NoSortAggregateStream {
         schema: SchemaRef,
         #[pin]
         output: futures::channel::oneshot::Receiver<ArrowResult<RecordBatch>>,
@@ -778,8 +733,8 @@ async fn compute_hash_aggregate(
     batch
 }
 
-impl HashAggregateStream {
-    /// Create a new HashAggregateStream
+impl NoSortAggregateStream {
+    /// Create a new NoSortAggregateStream
     pub fn new(
         id: MemoryConsumerId,
         mode: AggregateMode,
@@ -801,13 +756,13 @@ impl HashAggregateStream {
                 input,
                 elapsed_compute,
             )
-            .await
-            .record_output(&baseline_metrics);
+                .await
+                .record_output(&baseline_metrics);
 
             tx.send(result)
         });
 
-        HashAggregateStream {
+        NoSortAggregateStream {
             schema,
             output: rx,
             finished: false,
@@ -847,7 +802,7 @@ fn aggregate_batch(
         })
 }
 
-impl Stream for HashAggregateStream {
+impl Stream for NoSortAggregateStream {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(
@@ -879,7 +834,7 @@ impl Stream for HashAggregateStream {
     }
 }
 
-impl RecordBatchStream for HashAggregateStream {
+impl RecordBatchStream for NoSortAggregateStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -951,7 +906,7 @@ fn create_batch_from_map(
                             x[y].clone()
                         }),
                     )
-                    .map_err(DataFusionError::into_arrow_external_error)?;
+                        .map_err(DataFusionError::into_arrow_external_error)?;
 
                     columns.push(res);
                 }
@@ -961,7 +916,7 @@ fn create_batch_from_map(
                             group_state.accumulator_set[x].evaluate().unwrap()
                         }),
                     )
-                    .map_err(DataFusionError::into_arrow_external_error)?;
+                        .map_err(DataFusionError::into_arrow_external_error)?;
                     columns.push(res);
                 }
             }
@@ -1053,7 +1008,7 @@ mod tests {
                         Arc::new(Float64Array::from_slice(&[1.0, 2.0, 3.0, 4.0])),
                     ],
                 )
-                .unwrap(),
+                    .unwrap(),
                 RecordBatch::try_new(
                     schema,
                     vec![
@@ -1061,7 +1016,7 @@ mod tests {
                         Arc::new(Float64Array::from_slice(&[1.0, 2.0, 3.0, 4.0])),
                     ],
                 )
-                .unwrap(),
+                    .unwrap(),
             ],
         )
     }
@@ -1079,7 +1034,7 @@ mod tests {
             DataType::Float64,
         ))];
 
-        let partial_aggregate = Arc::new(HashAggregateExec::try_new(
+        let partial_aggregate = Arc::new(SortAggregateExec::try_new(
             AggregateMode::Partial,
             groups.clone(),
             aggregates.clone(),
@@ -1106,7 +1061,7 @@ mod tests {
             .map(|i| col(&groups[i].1, &input_schema))
             .collect::<Result<_>>()?;
 
-        let merged_aggregate = Arc::new(HashAggregateExec::try_new(
+        let merged_aggregate = Arc::new(SortAggregateExec::try_new(
             AggregateMode::Final,
             final_group
                 .iter()

@@ -37,7 +37,7 @@ use crate::physical_plan::explain::ExplainExec;
 use crate::physical_plan::expressions;
 use crate::physical_plan::expressions::{CaseExpr, Column, Literal, PhysicalSortExpr};
 use crate::physical_plan::filter::FilterExec;
-use crate::physical_plan::hash_aggregate::{AggregateMode, HashAggregateExec};
+use crate::physical_plan::aggregations::hash_aggregate::{AggregateMode, HashAggregateExec};
 use crate::physical_plan::joins::cross_join::CrossJoinExec;
 use crate::physical_plan::joins::hash_join::HashJoinExec;
 use crate::physical_plan::joins::hash_join::PartitionMode;
