@@ -51,16 +51,14 @@ use pin_project_lite::pin_project;
 use async_trait::async_trait;
 
 use crate::physical_plan::aggregations::{
-    aggregate_expressions, create_accumulators, create_schema, evaluate, evaluate_many,
-    AggregateMode,
+    aggregate_expressions, create_accumulators, evaluate, evaluate_many, AggregateMode,
 };
 use crate::physical_plan::metrics::{
     self, BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
 use crate::physical_plan::Statistics;
-use crate::physical_plan::{
-    expressions::Column, RecordBatchStream, SendableRecordBatchStream,
-};
+use crate::physical_plan::{RecordBatchStream, SendableRecordBatchStream};
+use arrow::datatypes::Field;
 
 /// Hash aggregate execution plan
 #[derive(Debug)]
@@ -81,6 +79,39 @@ pub struct HashAggregateExec {
     input_schema: SchemaRef,
     /// Execution Metrics
     metrics: ExecutionPlanMetricsSet,
+}
+
+fn create_schema(
+    input_schema: &Schema,
+    group_expr: &[(Arc<dyn PhysicalExpr>, String)],
+    aggr_expr: &[Arc<dyn AggregateExpr>],
+    mode: AggregateMode,
+) -> Result<Schema> {
+    let mut fields = Vec::with_capacity(group_expr.len() + aggr_expr.len());
+    for (expr, name) in group_expr {
+        fields.push(Field::new(
+            name,
+            expr.data_type(input_schema)?,
+            expr.nullable(input_schema)?,
+        ))
+    }
+
+    match mode {
+        AggregateMode::Partial => {
+            // in partial mode, the fields of the accumulator's state
+            for expr in aggr_expr {
+                fields.extend(expr.state_fields()?.iter().cloned())
+            }
+        }
+        AggregateMode::Final | AggregateMode::FinalPartitioned => {
+            // in final mode, the field with the final result of the accumulator
+            for expr in aggr_expr {
+                fields.push(expr.field()?)
+            }
+        }
+    }
+
+    Ok(Schema::new(fields))
 }
 
 impl HashAggregateExec {

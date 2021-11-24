@@ -19,14 +19,10 @@
 
 use std::any::Any;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
-use futures::{
-    stream::{Stream, StreamExt},
-    Future,
-};
+use futures::stream::StreamExt;
 
-use crate::physical_plan::aggregations::hash_aggregate::HashAggregateStream;
+use crate::execution::runtime_env::RUNTIME_ENV;
 use crate::physical_plan::{
     Accumulator, AggregateExpr, DisplayFormatType, Distribution, ExecutionPlan,
     Partitioning, PhysicalExpr,
@@ -38,42 +34,37 @@ use crate::{
 
 use arrow::{
     array::*,
-    buffer::MutableBuffer,
-    compute,
-    datatypes::{DataType, Schema, SchemaRef},
-    error::{ArrowError, Result as ArrowResult},
+    datatypes::{Schema, SchemaRef},
+    error::Result as ArrowResult,
     record_batch::RecordBatch,
 };
-use pin_project_lite::pin_project;
 
 use async_trait::async_trait;
 
 use crate::execution::runtime_env::RuntimeEnv;
 use crate::physical_plan::aggregations::{
-    aggregate_expressions, create_accumulators, create_schema, evaluate, evaluate_many,
-    AggregateMode,
+    aggregate_expressions, create_accumulators, evaluate_many, AggregateMode,
 };
 use crate::physical_plan::expressions::{exprs_to_sort_columns, PhysicalSortExpr};
 use crate::physical_plan::metrics::{
-    self, BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
+    self, BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet,
 };
+use crate::physical_plan::sorts::external_sort::ExternalSortExec;
 use crate::physical_plan::stream::RecordBatchReceiverStream;
 use crate::physical_plan::Statistics;
-use crate::physical_plan::{
-    expressions::Column, RecordBatchStream, SendableRecordBatchStream,
-};
+use crate::physical_plan::{expressions::Column, SendableRecordBatchStream};
 use arrow::compute::partition::lexicographical_partition_ranges;
-use std::cmp::Ordering;
+use arrow::datatypes::Field;
 use std::ops::Range;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-/// Hash aggregate execution plan
+/// Sort aggregate execution plan
 #[derive(Debug)]
 pub struct SortAggregateExec {
     /// Aggregation mode (full, partial)
     mode: AggregateMode,
     /// Grouping expressions
-    group_expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
+    group_expr: Vec<Column>,
     /// Aggregate expressions
     aggr_expr: Vec<Arc<dyn AggregateExpr>>,
     /// Input plan, could be a partial aggregate or the input to the aggregate
@@ -88,11 +79,44 @@ pub struct SortAggregateExec {
     metrics: ExecutionPlanMetricsSet,
 }
 
+fn create_schema(
+    input_schema: &Schema,
+    group_expr: &[Column],
+    aggr_expr: &[Arc<dyn AggregateExpr>],
+    mode: AggregateMode,
+) -> Result<Schema> {
+    let mut fields = Vec::with_capacity(group_expr.len() + aggr_expr.len());
+    for c in group_expr {
+        fields.push(Field::new(
+            c.name(),
+            c.data_type(input_schema)?,
+            c.nullable(input_schema)?,
+        ))
+    }
+
+    match mode {
+        AggregateMode::Partial => {
+            // in partial mode, the fields of the accumulator's state
+            for expr in aggr_expr {
+                fields.extend(expr.state_fields()?.iter().cloned())
+            }
+        }
+        AggregateMode::Final | AggregateMode::FinalPartitioned => {
+            // in final mode, the field with the final result of the accumulator
+            for expr in aggr_expr {
+                fields.push(expr.field()?)
+            }
+        }
+    }
+
+    Ok(Schema::new(fields))
+}
+
 impl SortAggregateExec {
-    /// Create a new hash aggregate execution plan
+    /// Create a new Sort aggregate execution plan
     pub fn try_new(
         mode: AggregateMode,
-        group_expr: Vec<(Arc<dyn PhysicalExpr>, String)>,
+        group_expr: Vec<Column>,
         aggr_expr: Vec<Arc<dyn AggregateExpr>>,
         input: Arc<dyn ExecutionPlan>,
         input_schema: SchemaRef,
@@ -118,7 +142,7 @@ impl SortAggregateExec {
     }
 
     /// Grouping expressions
-    pub fn group_expr(&self) -> &[(Arc<dyn PhysicalExpr>, String)] {
+    pub fn group_expr(&self) -> &[Column] {
         &self.group_expr
     }
 
@@ -158,7 +182,10 @@ impl ExecutionPlan for SortAggregateExec {
         match &self.mode {
             AggregateMode::Partial => Distribution::UnspecifiedDistribution,
             AggregateMode::FinalPartitioned => Distribution::HashPartitioned(
-                self.group_expr.iter().map(|x| x.0.clone()).collect(),
+                self.group_expr
+                    .iter()
+                    .map(|x| Arc::new(x.clone()) as Arc<dyn PhysicalExpr>)
+                    .collect::<Vec<_>>(),
             ),
             AggregateMode::Final => Distribution::SinglePartition,
         }
@@ -188,30 +215,44 @@ impl ExecutionPlan for SortAggregateExec {
 
     async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         let input = self.input.execute(partition).await?;
-        let group_expr = self.group_expr.iter().map(|x| x.0.clone()).collect();
+        let _baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
+        let sort = self
+            .input
+            .as_any()
+            .downcast_ref::<ExternalSortExec>()
+            .unwrap()
+            .expr()
+            .iter()
+            .map(|s| s.clone())
+            .collect::<Vec<_>>();
 
-        let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
+        assert!(
+            !self.group_expr.is_empty(),
+            "Should use hash_aggregate for non_grouping case"
+        );
 
-        if self.group_expr.is_empty() {
-            Ok(Box::pin(HashAggregateStream::new(
-                self.mode,
-                self.schema.clone(),
-                self.aggr_expr.clone(),
-                input,
-                baseline_metrics,
-            )))
-        } else {
-            let (tx, rx): (
-                Sender<ArrowResult<RecordBatch>>,
-                Receiver<ArrowResult<RecordBatch>>,
-            ) = tokio::sync::mpsc::channel(2);
+        let (tx, rx): (
+            Sender<ArrowResult<RecordBatch>>,
+            Receiver<ArrowResult<RecordBatch>>,
+        ) = tokio::sync::mpsc::channel(2);
 
-            let mut driver = SortAggregateDriver::new()?;
-            tokio::spawn(async move { driver.aggregate(&tx).await? });
+        let mut driver = SortAggregateDriver::new(
+            input,
+            sort,
+            self.schema.clone(),
+            RUNTIME_ENV.clone(),
+            self.group_expr.clone(),
+            self.aggr_expr.clone(),
+            self.mode,
+        )?;
 
-            let result = RecordBatchReceiverStream::create(&self.schema, rx);
-            Ok(result)
-        }
+        tokio::spawn(async move {
+            driver.aggregate(&tx).await?;
+            Ok::<(), DataFusionError>(())
+        });
+
+        let result = RecordBatchReceiverStream::create(&self.schema, rx);
+        Ok(result)
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -225,19 +266,9 @@ impl ExecutionPlan for SortAggregateExec {
     ) -> std::fmt::Result {
         match t {
             DisplayFormatType::Default => {
-                write!(f, "HashAggregateExec: mode={:?}", self.mode)?;
-                let g: Vec<String> = self
-                    .group_expr
-                    .iter()
-                    .map(|(e, alias)| {
-                        let e = e.to_string();
-                        if &e != alias {
-                            format!("{} as {}", e, alias)
-                        } else {
-                            e
-                        }
-                    })
-                    .collect();
+                write!(f, "SortAggregateExec: mode={:?}", self.mode)?;
+                let g: Vec<String> =
+                    self.group_expr.iter().map(|e| e.to_string()).collect();
                 write!(f, ", gby=[{}]", g.join(", "))?;
 
                 let a: Vec<String> = self
@@ -255,18 +286,7 @@ impl ExecutionPlan for SortAggregateExec {
         // TODO stats: group expressions:
         // - once expressions will be able to compute their own stats, use it here
         // - case where we group by on a column for which with have the `distinct` stat
-        // TODO stats: aggr expression:
-        // - aggregations somtimes also preserve invariants such as min, max...
         match self.mode {
-            AggregateMode::Final | AggregateMode::FinalPartitioned
-                if self.group_expr.is_empty() =>
-            {
-                Statistics {
-                    num_rows: Some(1),
-                    is_exact: true,
-                    ..Default::default()
-                }
-            }
             _ => Statistics::default(),
         }
     }
@@ -297,16 +317,20 @@ impl OutputBuffer {
     }
 
     fn is_full(&self) -> bool {
-        self.group_states.len() == self.batch_size
+        self.group_states.len() >= self.batch_size
     }
 
     fn is_empty(&self) -> bool {
         self.group_states.len() == 0
     }
 
-    fn output(&mut self, mode: &AggregateMode) -> ArrowResult<RecordBatch> {
+    fn output(
+        &mut self,
+        mode: &AggregateMode,
+        output_schema: &Arc<Schema>,
+    ) -> ArrowResult<RecordBatch> {
         let accs = &self.group_states[0].accumulator_set;
-        let num_group_expr = &self.group_states[0].group_by_values.len();
+        let num_group_expr = self.group_states[0].group_by_values.len();
         let mut acc_data_types: Vec<usize> = vec![];
 
         // Calculate number/shape of state arrays
@@ -374,7 +398,7 @@ impl OutputBuffer {
             })
             .collect::<ArrowResult<Vec<_>>>()?;
 
-        let result = RecordBatch::try_new(Arc::new(output_schema.to_owned()), columns);
+        let result = RecordBatch::try_new(output_schema.clone(), columns);
         self.group_states.drain(..);
         result
     }
@@ -387,7 +411,8 @@ struct SortAggregateDriver {
     needs_new_state: bool,
     sort: Vec<PhysicalSortExpr>,
     group_expr: Vec<Column>,
-    aggr_expr: Vec<Vec<Arc<dyn PhysicalExpr>>>,
+    aggr_expr: Vec<Arc<dyn AggregateExpr>>,
+    aggregate_expressions: Vec<Vec<Arc<dyn PhysicalExpr>>>,
     schema: Arc<Schema>,
     mode: AggregateMode,
 }
@@ -403,7 +428,8 @@ impl SortAggregateDriver {
         mode: AggregateMode,
     ) -> Result<Self> {
         let batch_size = runtime.batch_size();
-        let aggr_expr = aggregate_expressions(&aggr_expr, &mode, group_expr.len())?;
+        let aggregate_expressions =
+            aggregate_expressions(&aggr_expr, &mode, group_expr.len())?;
         Ok(Self {
             input,
             output: OutputBuffer::new(batch_size),
@@ -412,6 +438,7 @@ impl SortAggregateDriver {
             sort,
             group_expr,
             aggr_expr,
+            aggregate_expressions,
             schema,
             mode,
         })
@@ -426,15 +453,19 @@ impl SortAggregateDriver {
             let num_rows_in_batch = batch.num_rows();
 
             let columns = exprs_to_sort_columns(&batch, &self.sort)?;
-            let groups_iter = lexicographical_partition_ranges(
-                &columns.iter().map(|x| x.into()).collect::<Vec<_>>(),
-            )?;
+            let columns = &columns.iter().map(|x| x.into()).collect::<Vec<_>>();
+            let ranges = lexicographical_partition_ranges(columns)?.collect::<Vec<_>>();
 
-            let groups = evaluate(&self.group_expr, &batch)?;
-            let agg_inputs: Vec<Vec<ArrayRef>> = evaluate_many(&self.aggr_expr, &batch)?;
+            let groups = self
+                .group_expr
+                .iter()
+                .map(|c| batch.column(c.index()).clone())
+                .collect::<Vec<_>>();
+            let agg_inputs: Vec<Vec<ArrayRef>> =
+                evaluate_many(&self.aggregate_expressions, &batch)?;
 
             let mut is_first = true;
-            groups_iter.for_each(|range| {
+            for range in ranges {
                 let is_last = range.end == num_rows_in_batch;
                 if is_first && is_last {
                     if self.cmp_key_with_state(&groups) {
@@ -464,19 +495,19 @@ impl SortAggregateDriver {
                     self.update_state(&agg_inputs, &range)?;
                     self.needs_new_state = true;
                 }
+            }
 
-                if self.output.is_full() {
-                    let result = self.output.output(&self.mode);
-                    if let Err(e) = sender.send(result).await {
-                        println!("ERROR batch via aggregation stream: {}", e);
-                    };
-                }
-            });
+            if self.output.is_full() {
+                let result = self.output.output(&self.mode, &self.schema);
+                if let Err(e) = sender.send(result).await {
+                    println!("ERROR batch via aggregation stream: {}", e);
+                };
+            }
         }
 
         // send output batch
         if !self.output.is_empty() {
-            let result = self.output.output(&self.mode);
+            let result = self.output.output(&self.mode, &self.schema);
             if let Err(e) = sender.send(result).await {
                 println!("ERROR batch via aggregation stream last batch: {}", e);
             };
@@ -507,6 +538,7 @@ impl SortAggregateDriver {
         agg_inputs: &Vec<Vec<ArrayRef>>,
         range: &Range<usize>,
     ) -> Result<()> {
+        let agg_mod = self.mode;
         self.output.group_states[self.state_idx]
             .accumulator_set
             .iter_mut()
@@ -516,7 +548,7 @@ impl SortAggregateDriver {
                     .iter()
                     .map(|v| ArrayRef::from(v.slice(range.start, range.len())))
                     .collect::<Vec<ArrayRef>>();
-                match self.mode {
+                match agg_mod {
                     AggregateMode::Partial => accumulator.update_batch(&sliced),
                     AggregateMode::FinalPartitioned | AggregateMode::Final => {
                         // note: the aggregation here is over states, not values, thus the merge
@@ -556,6 +588,9 @@ mod tests {
     use crate::{assert_batches_sorted_eq, physical_plan::common};
 
     use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use crate::physical_plan::RecordBatchStream;
+    use futures::task::{Context, Poll};
+    use futures::Stream;
 
     /// some mock data to aggregates
     fn some_data() -> (Arc<Schema>, Vec<RecordBatch>) {

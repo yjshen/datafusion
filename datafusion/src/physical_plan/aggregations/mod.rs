@@ -19,9 +19,8 @@
 
 use crate::error::Result;
 use crate::physical_plan::expressions::Column;
-use crate::physical_plan::{AggregateExpr, PhysicalExpr};
+use crate::physical_plan::{Accumulator, AggregateExpr, PhysicalExpr};
 use arrow::array::ArrayRef;
-use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
@@ -42,39 +41,6 @@ pub enum AggregateMode {
     /// with Hash repartitioning on the group keys. If a group key is
     /// duplicated, duplicate groups would be produced
     FinalPartitioned,
-}
-
-fn create_schema(
-    input_schema: &Schema,
-    group_expr: &[(Arc<dyn PhysicalExpr>, String)],
-    aggr_expr: &[Arc<dyn AggregateExpr>],
-    mode: AggregateMode,
-) -> Result<Schema> {
-    let mut fields = Vec::with_capacity(group_expr.len() + aggr_expr.len());
-    for (expr, name) in group_expr {
-        fields.push(Field::new(
-            name,
-            expr.data_type(input_schema)?,
-            expr.nullable(input_schema)?,
-        ))
-    }
-
-    match mode {
-        AggregateMode::Partial => {
-            // in partial mode, the fields of the accumulator's state
-            for expr in aggr_expr {
-                fields.extend(expr.state_fields()?.iter().cloned())
-            }
-        }
-        AggregateMode::Final | AggregateMode::FinalPartitioned => {
-            // in final mode, the field with the final result of the accumulator
-            for expr in aggr_expr {
-                fields.push(expr.field()?)
-            }
-        }
-    }
-
-    Ok(Schema::new(fields))
 }
 
 /// Evaluates expressions against a record batch.
@@ -146,7 +112,7 @@ fn aggregate_expressions(
 
 fn create_accumulators(
     aggr_expr: &[Arc<dyn AggregateExpr>],
-) -> Result<Vec<AccumulatorItem>> {
+) -> Result<Vec<Box<dyn Accumulator>>> {
     aggr_expr
         .iter()
         .map(|expr| expr.create_accumulator())
