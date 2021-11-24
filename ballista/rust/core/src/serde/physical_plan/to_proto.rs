@@ -27,7 +27,7 @@ use std::{
 };
 
 use datafusion::logical_plan::JoinType;
-use datafusion::physical_plan::aggregations::hash_aggregate::AggregateMode;
+use datafusion::physical_plan::aggregations::AggregateMode;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::csv::CsvExec;
 use datafusion::physical_plan::expressions::{

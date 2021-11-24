@@ -30,11 +30,12 @@ mod roundtrip_tests {
         },
         logical_plan::{JoinType, Operator},
         physical_plan::{
+            aggregations::hash_aggregate::HashAggregateExec,
+            aggregations::AggregateMode,
             empty::EmptyExec,
             expressions::{binary, col, lit, InListExpr, NotExpr},
             expressions::{Avg, Column, PhysicalSortExpr},
             filter::FilterExec,
-            hash_aggregate::{AggregateMode, HashAggregateExec},
             limit::{GlobalLimitExec, LocalLimitExec},
             sorts::sort::SortExec,
             AggregateExpr, ColumnarValue, Distribution, ExecutionPlan, Partitioning,

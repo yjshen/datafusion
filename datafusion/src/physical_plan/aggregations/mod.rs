@@ -17,10 +17,13 @@
 
 //! Defines sort and hash based aggregation implementations.
 
-use arrow::datatypes::{Schema, Field};
-use std::sync::Arc;
-use crate::physical_plan::{PhysicalExpr, AggregateExpr};
 use crate::error::Result;
+use crate::physical_plan::expressions::Column;
+use crate::physical_plan::{AggregateExpr, PhysicalExpr};
+use arrow::array::ArrayRef;
+use arrow::datatypes::{Field, Schema};
+use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 
 pub mod hash_aggregate;
 pub mod sort_aggregate;
@@ -72,4 +75,80 @@ fn create_schema(
     }
 
     Ok(Schema::new(fields))
+}
+
+/// Evaluates expressions against a record batch.
+fn evaluate(
+    expr: &[Arc<dyn PhysicalExpr>],
+    batch: &RecordBatch,
+) -> Result<Vec<ArrayRef>> {
+    expr.iter()
+        .map(|expr| expr.evaluate(batch))
+        .map(|r| r.map(|v| v.into_array(batch.num_rows())))
+        .collect::<Result<Vec<_>>>()
+}
+
+/// Evaluates expressions against a record batch.
+fn evaluate_many(
+    expr: &[Vec<Arc<dyn PhysicalExpr>>],
+    batch: &RecordBatch,
+) -> Result<Vec<Vec<ArrayRef>>> {
+    expr.iter()
+        .map(|expr| evaluate(expr, batch))
+        .collect::<Result<Vec<_>>>()
+}
+
+/// uses `state_fields` to build a vec of physical column expressions required to merge the
+/// AggregateExpr' accumulator's state.
+///
+/// `index_base` is the starting physical column index for the next expanded state field.
+fn merge_expressions(
+    index_base: usize,
+    expr: &Arc<dyn AggregateExpr>,
+) -> Result<Vec<Arc<dyn PhysicalExpr>>> {
+    Ok(expr
+        .state_fields()?
+        .iter()
+        .enumerate()
+        .map(|(idx, f)| {
+            Arc::new(Column::new(f.name(), index_base + idx)) as Arc<dyn PhysicalExpr>
+        })
+        .collect::<Vec<_>>())
+}
+
+/// returns physical expressions to evaluate against a batch
+/// The expressions are different depending on `mode`:
+/// * Partial: AggregateExpr::expressions
+/// * Final: columns of `AggregateExpr::state_fields()`
+fn aggregate_expressions(
+    aggr_expr: &[Arc<dyn AggregateExpr>],
+    mode: &AggregateMode,
+    col_idx_base: usize,
+) -> Result<Vec<Vec<Arc<dyn PhysicalExpr>>>> {
+    match mode {
+        AggregateMode::Partial => {
+            Ok(aggr_expr.iter().map(|agg| agg.expressions()).collect())
+        }
+        // in this mode, we build the merge expressions of the aggregation
+        AggregateMode::Final | AggregateMode::FinalPartitioned => {
+            let mut col_idx_base = col_idx_base;
+            Ok(aggr_expr
+                .iter()
+                .map(|agg| {
+                    let exprs = merge_expressions(col_idx_base, agg)?;
+                    col_idx_base += exprs.len();
+                    Ok(exprs)
+                })
+                .collect::<Result<Vec<_>>>()?)
+        }
+    }
+}
+
+fn create_accumulators(
+    aggr_expr: &[Arc<dyn AggregateExpr>],
+) -> Result<Vec<AccumulatorItem>> {
+    aggr_expr
+        .iter()
+        .map(|expr| expr.create_accumulator())
+        .collect::<Result<Vec<_>>>()
 }

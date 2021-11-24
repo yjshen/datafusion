@@ -157,12 +157,17 @@ pub(crate) fn column_indices_from_schema(
 }
 
 macro_rules! equal_rows_elem {
-    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident) => {{
+    ($array_type:ident, $l: ident, $r: ident, $left: ident, $right: ident, $allow_nulls: ident) => {{
         let left_array = $l.as_any().downcast_ref::<$array_type>().unwrap();
         let right_array = $r.as_any().downcast_ref::<$array_type>().unwrap();
 
-        match (left_array.is_null($left), right_array.is_null($right)) {
-            (false, false) => left_array.value($left) == right_array.value($right),
+        match (
+            left_array.is_null($left),
+            right_array.is_null($right),
+            $allow_nulls,
+        ) {
+            (false, false, _) => left_array.value($left) == right_array.value($right),
+            (true, true, true) => true,
             _ => false,
         }
     }};
@@ -174,6 +179,7 @@ fn equal_rows(
     right: usize,
     left_arrays: &[ArrayRef],
     right_arrays: &[ArrayRef],
+    allow_nulls: bool,
 ) -> Result<bool> {
     let mut err = None;
     let res = left_arrays

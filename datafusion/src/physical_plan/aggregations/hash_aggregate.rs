@@ -34,7 +34,6 @@ use crate::physical_plan::{
 };
 use crate::{
     error::{DataFusionError, Result},
-    execution::memory_management::MemoryConsumerId,
     scalar::ScalarValue,
 };
 
@@ -42,7 +41,7 @@ use arrow::{
     array::*,
     buffer::MutableBuffer,
     compute,
-    datatypes::{DataType, Field, Schema, SchemaRef},
+    datatypes::{DataType, Schema, SchemaRef},
     error::{ArrowError, Result as ArrowResult},
     record_batch::RecordBatch,
 };
@@ -51,6 +50,10 @@ use pin_project_lite::pin_project;
 
 use async_trait::async_trait;
 
+use crate::physical_plan::aggregations::{
+    aggregate_expressions, create_accumulators, create_schema, evaluate, evaluate_many,
+    AggregateMode,
+};
 use crate::physical_plan::metrics::{
     self, BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
 };
@@ -58,7 +61,6 @@ use crate::physical_plan::Statistics;
 use crate::physical_plan::{
     expressions::Column, RecordBatchStream, SendableRecordBatchStream,
 };
-use crate::physical_plan::aggregations::{AggregateMode, create_schema};
 
 /// Hash aggregate execution plan
 #[derive(Debug)]
@@ -167,11 +169,8 @@ impl ExecutionPlan for HashAggregateExec {
 
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
 
-        let streamer_id = MemoryConsumerId::new(partition);
-
         if self.group_expr.is_empty() {
             Ok(Box::pin(HashAggregateStream::new(
-                streamer_id,
                 self.mode,
                 self.schema.clone(),
                 self.aggr_expr.clone(),
@@ -620,75 +619,8 @@ impl RecordBatchStream for GroupedHashAggregateStream {
     }
 }
 
-/// Evaluates expressions against a record batch.
-fn evaluate(
-    expr: &[Arc<dyn PhysicalExpr>],
-    batch: &RecordBatch,
-) -> Result<Vec<ArrayRef>> {
-    expr.iter()
-        .map(|expr| expr.evaluate(batch))
-        .map(|r| r.map(|v| v.into_array(batch.num_rows())))
-        .collect::<Result<Vec<_>>>()
-}
-
-/// Evaluates expressions against a record batch.
-fn evaluate_many(
-    expr: &[Vec<Arc<dyn PhysicalExpr>>],
-    batch: &RecordBatch,
-) -> Result<Vec<Vec<ArrayRef>>> {
-    expr.iter()
-        .map(|expr| evaluate(expr, batch))
-        .collect::<Result<Vec<_>>>()
-}
-
-/// uses `state_fields` to build a vec of physical column expressions required to merge the
-/// AggregateExpr' accumulator's state.
-///
-/// `index_base` is the starting physical column index for the next expanded state field.
-fn merge_expressions(
-    index_base: usize,
-    expr: &Arc<dyn AggregateExpr>,
-) -> Result<Vec<Arc<dyn PhysicalExpr>>> {
-    Ok(expr
-        .state_fields()?
-        .iter()
-        .enumerate()
-        .map(|(idx, f)| {
-            Arc::new(Column::new(f.name(), index_base + idx)) as Arc<dyn PhysicalExpr>
-        })
-        .collect::<Vec<_>>())
-}
-
-/// returns physical expressions to evaluate against a batch
-/// The expressions are different depending on `mode`:
-/// * Partial: AggregateExpr::expressions
-/// * Final: columns of `AggregateExpr::state_fields()`
-fn aggregate_expressions(
-    aggr_expr: &[Arc<dyn AggregateExpr>],
-    mode: &AggregateMode,
-    col_idx_base: usize,
-) -> Result<Vec<Vec<Arc<dyn PhysicalExpr>>>> {
-    match mode {
-        AggregateMode::Partial => {
-            Ok(aggr_expr.iter().map(|agg| agg.expressions()).collect())
-        }
-        // in this mode, we build the merge expressions of the aggregation
-        AggregateMode::Final | AggregateMode::FinalPartitioned => {
-            let mut col_idx_base = col_idx_base;
-            Ok(aggr_expr
-                .iter()
-                .map(|agg| {
-                    let exprs = merge_expressions(col_idx_base, agg)?;
-                    col_idx_base += exprs.len();
-                    Ok(exprs)
-                })
-                .collect::<Result<Vec<_>>>()?)
-        }
-    }
-}
-
 pin_project! {
-    struct HashAggregateStream {
+    pub(crate) struct HashAggregateStream {
         schema: SchemaRef,
         #[pin]
         output: futures::channel::oneshot::Receiver<ArrowResult<RecordBatch>>,
@@ -698,7 +630,6 @@ pin_project! {
 
 /// Special case aggregate with no groups
 async fn compute_hash_aggregate(
-    _id: MemoryConsumerId,
     mode: AggregateMode,
     schema: SchemaRef,
     aggr_expr: Vec<Arc<dyn AggregateExpr>>,
@@ -735,7 +666,6 @@ async fn compute_hash_aggregate(
 impl HashAggregateStream {
     /// Create a new HashAggregateStream
     pub fn new(
-        id: MemoryConsumerId,
         mode: AggregateMode,
         schema: SchemaRef,
         aggr_expr: Vec<Arc<dyn AggregateExpr>>,
@@ -748,7 +678,6 @@ impl HashAggregateStream {
         let elapsed_compute = baseline_metrics.elapsed_compute().clone();
         tokio::spawn(async move {
             let result = compute_hash_aggregate(
-                id,
                 mode,
                 schema_clone,
                 aggr_expr,
@@ -937,15 +866,6 @@ fn create_batch_from_map(
     RecordBatch::try_new(Arc::new(output_schema.to_owned()), columns)
 }
 
-fn create_accumulators(
-    aggr_expr: &[Arc<dyn AggregateExpr>],
-) -> Result<Vec<AccumulatorItem>> {
-    aggr_expr
-        .iter()
-        .map(|expr| expr.create_accumulator())
-        .collect::<Result<Vec<_>>>()
-}
-
 /// returns a vector of ArrayRefs, where each entry corresponds to either the
 /// final value (mode = Final) or states (mode = Partial)
 fn finalize_aggregation(
@@ -980,7 +900,7 @@ fn finalize_aggregation(
 mod tests {
 
     use arrow::array::{Float64Array, UInt32Array};
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, Field};
 
     use super::*;
     use crate::physical_plan::expressions::{col, Avg};

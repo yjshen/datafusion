@@ -647,7 +647,13 @@ fn build_join_indexes(
                 {
                     for &i in indices {
                         // Check hash collisions
-                        if equal_rows(i as usize, row, &left_join_values, &keys_values)? {
+                        if equal_rows(
+                            i as usize,
+                            row,
+                            &left_join_values,
+                            &keys_values,
+                            false,
+                        )? {
                             left_indices.push(i as u64);
                             right_indices.push(row as u32);
                         }
@@ -679,7 +685,13 @@ fn build_join_indexes(
                 {
                     for &i in indices {
                         // Collision check
-                        if equal_rows(i as usize, row, &left_join_values, &keys_values)? {
+                        if equal_rows(
+                            i as usize,
+                            row,
+                            &left_join_values,
+                            &keys_values,
+                            false,
+                        )? {
                             left_indices.push(i as u64);
                             right_indices.push(row as u32);
                         }
@@ -713,6 +725,7 @@ fn build_join_indexes(
                                 row,
                                 &left_join_values,
                                 &keys_values,
+                                false,
                             )? {
                                 left_indices.push(Some(i as u64));
                                 right_indices.push(Some(row as u32));

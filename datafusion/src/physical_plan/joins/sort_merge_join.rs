@@ -255,6 +255,8 @@ struct BufferedBatches {
     /// Join on column
     on_column: Vec<Column>,
     sort: Vec<PhysicalSortExpr>,
+    /// last range's index in the last batch
+    range_idx: usize,
 }
 
 impl BufferedBatches {
@@ -267,6 +269,7 @@ impl BufferedBatches {
             next_key_batch: vec![],
             on_column,
             sort,
+            range_idx: 0,
         }
     }
 
@@ -301,7 +304,11 @@ impl BufferedBatches {
     }
 
     /// Whether the running key ends at the current batch `prb`, true for continues, false for ends.
-    fn running_key(&mut self, prb: &PartitionedRecordBatch) -> Result<bool> {
+    fn running_key(
+        &mut self,
+        prb: &PartitionedRecordBatch,
+        allows_null: bool,
+    ) -> Result<bool> {
         let first_range = &prb.ranges[0];
         let range_len = first_range.len();
         let current_batch = &prb.batch;
@@ -313,16 +320,19 @@ impl BufferedBatches {
                 self.batches.push_back(prb.clone());
                 self.ranges.push_back(first_range.clone());
                 self.key_idx = Some(0);
+                self.range_idx = 0;
                 self.row_num += range_len;
                 Ok(single_range)
             }
             Some(key_idx) => {
                 let key_arrays = join_arrays(&self.batches[0].batch, &self.on_column);
                 let current_arrays = join_arrays(current_batch, &self.on_column);
-                let equal = equal_rows(key_idx, 0, &key_arrays, &current_arrays)?;
+                let equal =
+                    equal_rows(key_idx, 0, &key_arrays, &current_arrays, allows_null)?;
                 if equal {
                     self.batches.push_back(prb.clone());
                     self.ranges.push_back(first_range.clone());
+                    self.range_idx = 0;
                     self.row_num += range_len;
                     Ok(single_range)
                 } else {
@@ -356,18 +366,12 @@ impl BufferedBatches {
             self.ranges.drain(0..(self.batches.len() - 1));
         }
 
+        self.range_idx += 1;
         if let Some(batch) = self.batches.pop_back() {
             let tail_range = self.ranges.pop_back().unwrap();
-            let next_range_idx = batch
-                .ranges
-                .iter()
-                .enumerate()
-                .find(|(_, range)| range.start == tail_range.start)
-                .unwrap()
-                .0;
             self.key_idx = Some(tail_range.end);
-            self.ranges.push_back(batch.ranges[next_range_idx].clone());
-            self.row_num = batch.ranges[next_range_idx].len();
+            self.ranges.push_back(batch.ranges[self.range_idx].clone());
+            self.row_num = batch.ranges[self.range_idx].len();
             self.batches.push_back(batch);
         }
     }
@@ -478,9 +482,14 @@ impl OutputBuffer {
     }
 
     fn output_and_reset(&mut self) -> ArrowResult<RecordBatch> {
-        let result = make_batch(self.schema.clone(), self.arrays.drain(..).collect());
+        let result = self.output();
         let mut new = new_arrays(&self.schema, self.target_batch_size)?;
         self.arrays.append(&mut new);
+        result
+    }
+
+    fn output(&mut self) -> ArrowResult<RecordBatch> {
+        let result = make_batch(self.schema.clone(), self.arrays.drain(..).collect());
         self.slots_available = self.target_batch_size;
         result
     }
@@ -1201,6 +1210,7 @@ impl SortMergeJoinDriver {
                         if batch.ranges.len() == 1 {
                             self.cumulate_same_keys().await?;
                         }
+                        self.buffered_batches.range_idx = 0;
                     }
                 }
             } else {
@@ -1210,6 +1220,7 @@ impl SortMergeJoinDriver {
                 if batch.ranges.len() == 1 {
                     self.cumulate_same_keys().await?;
                 }
+                self.buffered_batches.range_idx = 0;
             }
         } else {
             self.buffered_batches.advance_in_current_batch();
@@ -1217,21 +1228,23 @@ impl SortMergeJoinDriver {
                 .is_last_range(&self.buffered_batches.ranges[0])
             {
                 self.cumulate_same_keys().await?;
+                self.buffered_batches.range_idx = 0;
             }
         }
         Ok(false)
     }
 
     /// true for has next, false for buffer side ended
-    async fn cumulate_same_keys(&mut self) -> Result<bool> {
+    async fn cumulate_same_keys(&mut self) -> Result<()> {
         loop {
             let batch = self.get_buffered_next().await?;
             match batch {
-                None => return Ok(false),
+                None => return Ok(()),
                 Some(batch) => {
-                    let more_batches = self.buffered_batches.running_key(&batch)?;
+                    let more_batches =
+                        self.buffered_batches.running_key(&batch, false)?;
                     if !more_batches {
-                        return Ok(true);
+                        return Ok(());
                     }
                 }
             }
@@ -1480,14 +1493,19 @@ impl ExecutionPlan for SortMergeJoinExec {
             )?,
         };
 
-        match self.join_type {
-            JoinType::Inner => driver.inner_join_driver(&tx).await?,
-            JoinType::Left => driver.outer_join_driver(&tx).await?,
-            JoinType::Right => driver.outer_join_driver(&tx).await?,
-            JoinType::Full => driver.full_outer_driver(&tx).await?,
-            JoinType::Semi => driver.semi_join_driver(&tx).await?,
-            JoinType::Anti => driver.anti_join_driver(&tx).await?,
-        }
+        let join_type = self.join_type;
+
+        tokio::spawn(async move {
+            match join_type {
+                JoinType::Inner => driver.inner_join_driver(&tx).await?,
+                JoinType::Left => driver.outer_join_driver(&tx).await?,
+                JoinType::Right => driver.outer_join_driver(&tx).await?,
+                JoinType::Full => driver.full_outer_driver(&tx).await?,
+                JoinType::Semi => driver.semi_join_driver(&tx).await?,
+                JoinType::Anti => driver.anti_join_driver(&tx).await?,
+            }
+            Ok::<(), DataFusionError>(())
+        });
 
         let result = RecordBatchReceiverStream::create(&self.schema, rx);
 
