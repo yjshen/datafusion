@@ -449,53 +449,55 @@ impl SortAggregateDriver {
         sender: &Sender<ArrowResult<RecordBatch>>,
     ) -> Result<()> {
         while let Some(batch) = self.input.next().await {
-            let batch = batch.map_err(DataFusionError::ArrowError)?;
-            let num_rows_in_batch = batch.num_rows();
+            {
+                let batch = batch.map_err(DataFusionError::ArrowError)?;
+                let num_rows_in_batch = batch.num_rows();
 
-            let columns = exprs_to_sort_columns(&batch, &self.sort)?;
-            let columns = &columns.iter().map(|x| x.into()).collect::<Vec<_>>();
-            let ranges = lexicographical_partition_ranges(columns)?.collect::<Vec<_>>();
+                let columns = exprs_to_sort_columns(&batch, &self.sort)?;
+                let columns = &columns.iter().map(|x| x.into()).collect::<Vec<_>>();
+                let ranges = lexicographical_partition_ranges(columns)?;
 
-            let groups = self
-                .group_expr
-                .iter()
-                .map(|c| batch.column(c.index()).clone())
-                .collect::<Vec<_>>();
-            let agg_inputs: Vec<Vec<ArrayRef>> =
-                evaluate_many(&self.aggregate_expressions, &batch)?;
+                let groups = self
+                    .group_expr
+                    .iter()
+                    .map(|c| batch.column(c.index()).clone())
+                    .collect::<Vec<_>>();
+                let agg_inputs: Vec<Vec<ArrayRef>> =
+                    evaluate_many(&self.aggregate_expressions, &batch)?;
 
-            let mut is_first = true;
-            for range in ranges {
-                let is_last = range.end == num_rows_in_batch;
-                if is_first && is_last {
-                    if self.cmp_key_with_state(&groups) {
-                        self.update_state(&agg_inputs, &range)?;
-                    } else {
-                        self.needs_new_state = true;
+                let mut is_first = true;
+                for range in ranges {
+                    let is_last = range.end == num_rows_in_batch;
+                    if is_first && is_last {
+                        if self.cmp_key_with_state(&groups) {
+                            self.update_state(&agg_inputs, &range)?;
+                        } else {
+                            self.needs_new_state = true;
+                            self.create_new_state(&groups, range.start)?;
+                            self.update_state(&agg_inputs, &range)?;
+                        }
+                    } else if is_first {
+                        if self.cmp_key_with_state(&groups) {
+                            self.update_state(&agg_inputs, &range)?;
+                            self.needs_new_state = true;
+                        } else {
+                            self.needs_new_state = true;
+                            self.create_new_state(&groups, range.start)?;
+                            self.update_state(&agg_inputs, &range)?;
+                            self.needs_new_state = true;
+                        }
+                        is_first = false;
+                    } else if is_last {
                         self.create_new_state(&groups, range.start)?;
                         self.update_state(&agg_inputs, &range)?;
-                    }
-                } else if is_first {
-                    if self.cmp_key_with_state(&groups) {
-                        self.update_state(&agg_inputs, &range)?;
-                        self.needs_new_state = true;
                     } else {
-                        self.needs_new_state = true;
+                        // create new state and output
                         self.create_new_state(&groups, range.start)?;
                         self.update_state(&agg_inputs, &range)?;
                         self.needs_new_state = true;
                     }
-                    is_first = false;
-                } else if is_last {
-                    self.create_new_state(&groups, range.start)?;
-                    self.update_state(&agg_inputs, &range)?;
-                } else {
-                    // create new state and output
-                    self.create_new_state(&groups, range.start)?;
-                    self.update_state(&agg_inputs, &range)?;
-                    self.needs_new_state = true;
                 }
-            }
+            } // an extra scope to drop ranges iterator earlier and avoid it across .await
 
             if self.output.is_full() {
                 let result = self.output.output(&self.mode, &self.schema);
