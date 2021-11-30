@@ -21,11 +21,11 @@ use super::{RecordBatchStream, SendableRecordBatchStream};
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::{ColumnStatistics, ExecutionPlan, Statistics};
 use arrow::compute::aggregate::estimated_bytes_size;
-use arrow::compute::concat;
+use arrow::compute::concatenate;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::error::Result as ArrowResult;
-use arrow::io::ipc::write::FileWriter;
+use arrow::io::ipc::write::{FileWriter, WriteOptions};
 use arrow::record_batch::RecordBatch;
 use futures::channel::mpsc;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
@@ -98,7 +98,7 @@ pub(crate) fn combine_batches(
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                concat::concatenate(
+                concatenate::concatenate(
                     &batches
                         .iter()
                         .map(|batch| batch.column(i).as_ref())
@@ -253,7 +253,7 @@ impl IPCWriterWrapper {
             num_rows: 0,
             num_bytes: 0,
             path: path.to_owned(),
-            writer: FileWriter::try_new(buffer_writer, schema)?,
+            writer: FileWriter::try_new(buffer_writer, schema, WriteOptions::default())?,
         })
     }
 
