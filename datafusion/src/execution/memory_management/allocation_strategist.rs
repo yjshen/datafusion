@@ -17,7 +17,6 @@
 
 //! Execution Memory Pool that guarantees a memory allocation strategy
 
-use crate::execution::memory_management::MemoryConsumerId;
 use async_trait::async_trait;
 use hashbrown::HashMap;
 use log::{info, warn};
@@ -189,7 +188,7 @@ impl MemoryAllocationStrategist for FairStrategist {
             if to_grant < required && current_mem + to_grant < min_memory_per_partition {
                 info!(
                     "{:?} waiting for at least 1/2N of pool to be free",
-                    consumer
+                    partition_id
                 );
                 let _ = self.notify.notified().await;
             } else {
@@ -214,12 +213,12 @@ impl MemoryAllocationStrategist for FairStrategist {
         } else {
             let mut partition_usage = self.memory_usage.write().await;
             if granted_size > real_size {
-                *partition_usage.entry(consumer.partition_id).or_insert(0) -=
+                *partition_usage.entry(partition_id).or_insert(0) -=
                     granted_size - real_size;
             } else {
                 // TODO: this would have caused OOM already if size estimation ahead is much smaller than
                 // that of actual allocation
-                *partition_usage.entry(consumer.partition_id).or_insert(0) +=
+                *partition_usage.entry(partition_id).or_insert(0) +=
                     real_size - granted_size;
             }
         }
