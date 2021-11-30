@@ -116,7 +116,7 @@ impl MemoryManager {
         consumer: &MemoryConsumerId,
     ) {
         self.strategist
-            .update_usage(granted_size, real_size, consumer)
+            .update_usage(granted_size, real_size, consumer.partition_id)
             .await
     }
 
