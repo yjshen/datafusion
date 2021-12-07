@@ -60,6 +60,11 @@ impl RuntimeEnv {
         self.config.batch_size
     }
 
+    /// Get execution shuffle buffer batch size based on config
+    pub fn shuffle_batch_size(&self) -> usize {
+        self.config.shuffle_batch_size
+    }
+
     /// Register the consumer to get it tracked
     pub async fn register_consumer(&self, memory_consumer: Arc<dyn MemoryConsumer>) {
         self.memory_manager.register_consumer(memory_consumer).await;
@@ -75,6 +80,10 @@ pub struct RuntimeConfig {
     pub max_memory: usize,
     /// Local dirs to store temporary files during execution
     pub local_dirs: Vec<String>,
+    /// Default batch size when creating new shuffle buffers
+    /// The batch size is intended to be smaller than batch_size
+    /// to avoid too much shuffle buffer memory consumption.
+    pub shuffle_batch_size: usize,
 }
 
 impl RuntimeConfig {
@@ -88,6 +97,14 @@ impl RuntimeConfig {
         // batch size must be greater than zero
         assert!(n > 0);
         self.batch_size = n;
+        self
+    }
+
+    /// Customize shuffle buffer batch size
+    pub fn with_shuffle_batch_size(mut self, n: usize) -> Self {
+        // shuffle buffer batch size must be greater than zero
+        assert!(n > 0);
+        self.shuffle_batch_size = n;
         self
     }
 
@@ -116,6 +133,7 @@ impl Default for RuntimeConfig {
             batch_size: 8192,
             max_memory: usize::MAX,
             local_dirs: vec![path],
+            shuffle_batch_size: 512,
         }
     }
 }
