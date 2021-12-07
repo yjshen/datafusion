@@ -29,12 +29,12 @@ fn read_meta<R: Read + Seek>(
     reader: &mut R,
     end: usize,
 ) -> Result<(usize, FileMetadata)> {
-    let ipc_end = end - 4;
-    reader.seek(SeekFrom::Start(end as u64))?;
-    let mut meta_buf = [0; 4];
+    let ipc_end = end - 8;
+    reader.seek(SeekFrom::Start(ipc_end as u64))?;
+    let mut meta_buf = [0; 8];
     reader.read_exact(&mut meta_buf)?;
-    let ipc_length = i32::from_le_bytes(meta_buf);
-    let ipc_start = end - ipc_length as usize;
+    let ipc_length = u64::from_le_bytes(meta_buf);
+    let ipc_start = ipc_end - ipc_length as usize;
 
     let ipc_meta = read_file_segment_metadata(reader, ipc_start as u64, ipc_end as u64)
         .map_err(DataFusionError::ArrowError)?;

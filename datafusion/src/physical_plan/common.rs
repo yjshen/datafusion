@@ -26,6 +26,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::error::Result as ArrowResult;
 use arrow::io::ipc::write::{FileWriter, WriteOptions};
+use arrow::mutable_record_batch::MutableRecordBatch;
 use arrow::record_batch::RecordBatch;
 use futures::channel::mpsc;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
@@ -234,7 +235,7 @@ pub struct IPCWriterWrapper {
     /// path
     pub path: String,
     /// Inner writer
-    pub writer: FileWriter<BufWriter<File>>,
+    pub writer: FileWriter<File>,
     /// bathes written
     pub num_batches: u64,
     /// rows written
@@ -246,14 +247,13 @@ pub struct IPCWriterWrapper {
 impl IPCWriterWrapper {
     /// Create new writer
     pub fn new(path: &str, schema: &Schema) -> Result<Self> {
-        let file = File::create(path).map_err(|e| DataFusionError::IoError(e))?;
-        let buffer_writer = std::io::BufWriter::new(file);
+        let file = File::create(path)?;
         Ok(Self {
             num_batches: 0,
             num_rows: 0,
             num_bytes: 0,
             path: path.to_owned(),
-            writer: FileWriter::try_new(buffer_writer, schema, WriteOptions::default())?,
+            writer: FileWriter::try_new(file, schema, WriteOptions::default())?,
         })
     }
 
@@ -284,6 +284,12 @@ pub fn batch_memory_size(rb: &RecordBatch) -> usize {
         .iter()
         .map(|c| estimated_bytes_size(c.as_ref()))
         .sum()
+}
+
+/// Estimate buffer batch memory footprint
+/// TODO: it's now a stub without actually counting the size
+pub fn mutable_batch_memory_size(rb: &MutableRecordBatch) -> usize {
+    rb.arrays().iter().map(|a| 0).sum()
 }
 
 #[cfg(test)]

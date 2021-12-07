@@ -22,6 +22,7 @@ use crate::execution::memory_management::{
     MemoryConsumer, MemoryConsumerId, MemoryManager,
 };
 use crate::execution::runtime_env::RuntimeEnv;
+use crate::physical_plan::common::{batch_memory_size, mutable_batch_memory_size};
 use crate::physical_plan::hash_utils::create_hashes;
 use crate::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet};
 use crate::physical_plan::Partitioning;
@@ -30,16 +31,19 @@ use arrow::array::*;
 use arrow::compute::take;
 use arrow::datatypes::{PhysicalType, PrimitiveType, SchemaRef};
 use arrow::error::Result as ArrowResult;
+use arrow::io::ipc::write::{FileWriter, WriteOptions};
 use arrow::mutable_record_batch::MutableRecordBatch;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use futures::lock::Mutex;
+use log::{error, info};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Arc;
-use log::{error, info};
-
+use tokio::task;
 
 #[derive(Default)]
 struct PartitionBuffer {
@@ -47,9 +51,36 @@ struct PartitionBuffer {
     active: Option<MutableRecordBatch>,
 }
 
+impl PartitionBuffer {
+    fn size_estimation(&self) -> usize {
+        let mut res: usize = 0;
+        res += self.frozen.iter().map(batch_memory_size).sum::<usize>();
+        if let Some(ref batch) = self.active {
+            res += mutable_batch_memory_size(batch);
+        }
+        res
+    }
+
+    fn output_all(&mut self) -> Result<Vec<RecordBatch>> {
+        let mut output = vec![];
+        output.extend(self.frozen.drain(..));
+        if let Some(mut mutable) = self.active.take() {
+            let result = mutable.output_and_reset()?;
+            output.push(result);
+            self.active = Some(mutable);
+        }
+        Ok(output)
+    }
+}
+
 struct DataIndex {
     data_file: String,
     index_file: String,
+}
+
+struct SpillInfo {
+    path: String,
+    length: Vec<u64>,
 }
 
 fn create_tmp_data_index(runtime: &Arc<RuntimeEnv>) -> Result<DataIndex> {
@@ -91,7 +122,7 @@ struct ShuffleRepartitioner {
     id: MemoryConsumerId,
     schema: SchemaRef,
     buffered_partitions: Mutex<Vec<PartitionBuffer>>,
-    spills: Mutex<Vec<DataIndex>>,
+    spills: Mutex<Vec<SpillInfo>>,
     /// Sort expressions
     /// Partitioning scheme to use
     partitioning: Partitioning,
@@ -149,28 +180,29 @@ impl ShuffleRepartitioner {
             return Ok(0);
         }
 
-        let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
-
-        let data_n_index = create_tmp_data_index(&self.runtime)?;
-
         let path = self.runtime.disk_manager.create_tmp_file()?;
-        let total_size = spill_into(
+        let (total_size, length) = spill_into(
             &mut *buffered_partitions,
             self.schema.clone(),
-            &data_n_index,
+            path.as_str(),
+            self.num_output_partitions,
         )
-        .await;
-
-        let total_size = spill(&mut stream?, path.clone(), self.schema.clone()).await?;
+        .await?;
 
         let mut spills = self.spills.lock().await;
         self.spilled_count.fetch_add(1, Ordering::SeqCst);
         self.spilled_bytes.fetch_add(total_size, Ordering::SeqCst);
-        spills.push(data_n_index);
+        spills.push(SpillInfo { path, length });
         Ok(total_size)
     }
 
     async fn insert_batch(&self, input: RecordBatch) -> Result<()> {
+        // TODO: this is a rough estimation of memory consumed for a input batch
+        // for example, for first batch seen, we need to open as much output buffer
+        // as we encountered in this batch, thus the memory consumption is `rough`.
+        let size = batch_memory_size(&input);
+        self.allocate(size).await?;
+
         let random_state = self.random.clone();
         let num_output_partitions = self.num_output_partitions;
         let shuffle_batch_size = self.runtime.shuffle_batch_size();
@@ -179,11 +211,7 @@ impl ShuffleRepartitioner {
                 let hashes_buf = &mut vec![];
                 let arrays = exprs
                     .iter()
-                    .map(|expr| {
-                        Ok(expr
-                            .evaluate(&input)?
-                            .into_array(input.num_rows()))
-                    })
+                    .map(|expr| Ok(expr.evaluate(&input)?.into_array(input.num_rows())))
                     .collect::<Result<Vec<_>>>()?;
                 hashes_buf.resize(arrays[0].len(), 0);
                 // Hash arrays and compute buckets based on number of partitions
@@ -230,7 +258,7 @@ impl ShuffleRepartitioner {
 
                         let mut batch = output.active.take().unwrap();
                         batch
-                            .arrays
+                            .arrays_mut()
                             .iter_mut()
                             .zip(columns.iter())
                             .for_each(|(to, from)| append_column(to, from));
@@ -257,18 +285,64 @@ impl ShuffleRepartitioner {
     }
 }
 
-/// consume the `sorted_bathes` and do in_mem_sort
+/// consume the `buffered_partitions` and do spill into a single temp shuffle output file
 async fn spill_into(
     buffered_partitions: &mut Vec<PartitionBuffer>,
     schema: SchemaRef,
-    data_n_index: &DataIndex,
-) -> Result<()> {
-    Ok(())
+    path: &str,
+    num_output_partitions: usize,
+) -> Result<(usize, Vec<u64>)> {
+    let mut freed = 0;
+    let mut output_batches: Vec<Vec<RecordBatch>> = vec![vec![]; num_output_partitions];
+
+    for i in 0..num_output_partitions {
+        freed += buffered_partitions[i].size_estimation();
+        let partition_batches = buffered_partitions[i].output_all()?;
+        output_batches[i] = partition_batches;
+    }
+    let path = path.to_owned();
+
+    let res = task::spawn_blocking(move || {
+        let mut length = vec![0; num_output_partitions];
+        let mut file = OpenOptions::new().read(true).append(true).open(path)?;
+
+        for i in 0..num_output_partitions {
+            let partition_start = file.seek(SeekFrom::Current(0))?;
+            let partition_batches = &output_batches[i];
+            if partition_batches.len() > 0 {
+                let mut file_writer =
+                    FileWriter::try_new(file, &schema, WriteOptions::default())?;
+                for batch in partition_batches {
+                    file_writer.write(&batch)?;
+                }
+                file_writer.finish()?;
+
+                file = file_writer.into_inner();
+                let partition_end = file.seek(SeekFrom::Current(0))?;
+                let ipc_length: u64 = partition_end - partition_start;
+                file.write_all(&ipc_length.to_le_bytes()[..])?;
+                file.flush()?;
+                length[i] = ipc_length + 8;
+            } else {
+                length[i] = 0;
+            }
+        }
+        Ok(length)
+    })
+    .await;
+
+    match res {
+        Ok(r) => r.map(|s| (freed, s)),
+        Err(e) => Err(DataFusionError::Execution(format!(
+            "Error occurred while spilling {}",
+            e
+        ))),
+    }
 }
 
 impl Debug for ShuffleRepartitioner {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ExternalSorter")
+        f.debug_struct("ShuffleRepartitioner")
             .field("id", &self.id())
             .field("memory_used", &self.get_used())
             .field("spilled_bytes", &self.spilled_bytes())
