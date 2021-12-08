@@ -22,25 +22,30 @@ use crate::execution::memory_management::{
     MemoryConsumer, MemoryConsumerId, MemoryManager,
 };
 use crate::execution::runtime_env::RuntimeEnv;
+use crate::execution::runtime_env::RUNTIME_ENV;
 use crate::physical_plan::common::{batch_memory_size, mutable_batch_memory_size};
 use crate::physical_plan::hash_utils::create_hashes;
-use crate::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet};
-use crate::physical_plan::Partitioning;
+use crate::physical_plan::memory::MemoryStream;
+use crate::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use crate::physical_plan::{
+    DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream, Statistics,
+};
 use ahash::RandomState;
 use arrow::array::*;
 use arrow::compute::take;
-use arrow::datatypes::{PhysicalType, PrimitiveType, SchemaRef};
-use arrow::error::Result as ArrowResult;
+use arrow::datatypes::{DataType, Field, PhysicalType, PrimitiveType, Schema, SchemaRef};
 use arrow::io::ipc::write::{FileWriter, WriteOptions};
 use arrow::mutable_record_batch::MutableRecordBatch;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use futures::lock::Mutex;
-use log::{error, info};
+use futures::StreamExt;
+use log::info;
+use std::any::Any;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::task;
@@ -71,16 +76,21 @@ impl PartitionBuffer {
         }
         Ok(output)
     }
-}
 
-struct DataIndex {
-    data_file: String,
-    index_file: String,
+    fn output_clean(&mut self) -> Result<Vec<RecordBatch>> {
+        let mut output = vec![];
+        output.extend(self.frozen.drain(..));
+        if let Some(mut mutable) = self.active.take() {
+            let result = mutable.output()?;
+            output.push(result);
+        }
+        Ok(output)
+    }
 }
 
 struct SpillInfo {
     path: String,
-    length: Vec<u64>,
+    offsets: Vec<u64>,
 }
 
 fn create_tmp_data_index(runtime: &Arc<RuntimeEnv>) -> Result<DataIndex> {
@@ -120,6 +130,7 @@ fn append_column(to: &mut Box<dyn MutableArray>, from: &Arc<dyn Array>) {
 
 struct ShuffleRepartitioner {
     id: MemoryConsumerId,
+    shuffle_id: usize,
     schema: SchemaRef,
     buffered_partitions: Mutex<Vec<PartitionBuffer>>,
     spills: Mutex<Vec<SpillInfo>>,
@@ -139,6 +150,7 @@ struct ShuffleRepartitioner {
 impl ShuffleRepartitioner {
     pub fn new(
         partition_id: usize,
+        shuffle_id: usize,
         schema: SchemaRef,
         partitioning: Partitioning,
         runtime: Arc<RuntimeEnv>,
@@ -146,6 +158,7 @@ impl ShuffleRepartitioner {
         let num_output_partitions = partitioning.partition_count();
         Self {
             id: MemoryConsumerId::new(partition_id),
+            shuffle_id,
             schema,
             buffered_partitions: Mutex::new(Default::default()),
             spills: Mutex::new(vec![]),
@@ -173,7 +186,6 @@ impl ShuffleRepartitioner {
             self.spilled_count()
         );
 
-        let partition = self.partition_id();
         let mut buffered_partitions = self.buffered_partitions.lock().await;
         // we could always get a chance to free some memory as long as we are holding some
         if buffered_partitions.len() == 0 {
@@ -181,7 +193,7 @@ impl ShuffleRepartitioner {
         }
 
         let path = self.runtime.disk_manager.create_tmp_file()?;
-        let (total_size, length) = spill_into(
+        let (total_size, offsets) = spill_into(
             &mut *buffered_partitions,
             self.schema.clone(),
             path.as_str(),
@@ -192,7 +204,7 @@ impl ShuffleRepartitioner {
         let mut spills = self.spills.lock().await;
         self.spilled_count.fetch_add(1, Ordering::SeqCst);
         self.spilled_bytes.fetch_add(total_size, Ordering::SeqCst);
-        spills.push(SpillInfo { path, length });
+        spills.push(SpillInfo { path, offsets });
         Ok(total_size)
     }
 
@@ -283,6 +295,124 @@ impl ShuffleRepartitioner {
         }
         Ok(())
     }
+
+    async fn shuffle_write(&self) -> Result<SendableRecordBatchStream> {
+        let partition = self.partition_id();
+        let num_output_partitions = self.num_output_partitions;
+        let data_file = format!("shuffle_{}_{}_0.data", self.shuffle_id, partition);
+        let index_file = format!("shuffle_{}_{}_0.index", self.shuffle_id, partition);
+
+        let mut buffered_partitions = self.buffered_partitions.lock().await;
+        let mut freed = 0;
+        let mut output_batches: Vec<Vec<RecordBatch>> =
+            vec![vec![]; num_output_partitions];
+
+        for i in 0..num_output_partitions {
+            freed += buffered_partitions[i].size_estimation();
+            let partition_batches = buffered_partitions[i].output_clean()?;
+            output_batches[i] = partition_batches;
+        }
+
+        let mut spills = self.spills.lock().await;
+        let output_spills = spills.drain(..).collect::<Vec<_>>();
+
+        let data_file_clone = data_file.clone();
+        let index_file_clone = index_file.clone();
+        let input_schema = self.schema.clone();
+        let res = task::spawn_blocking(move || {
+            let mut offset: u64 = 0;
+            let mut offsets = vec![0; num_output_partitions + 1];
+            let mut output_data = OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(data_file_clone)?;
+
+            let mut spill_files = vec![];
+            for s in 0..output_spills.len() {
+                let reader = File::open(&output_spills[s].path)?;
+                spill_files.push(reader);
+            }
+
+            for i in 0..num_output_partitions {
+                offsets[i] = offset;
+                let partition_start = output_data.seek(SeekFrom::Current(0))?;
+
+                // write in-mem batches first if any
+                let in_mem_batches = &output_batches[i];
+                if in_mem_batches.len() > 0 {
+                    let mut file_writer = FileWriter::try_new(
+                        output_data,
+                        input_schema.as_ref(),
+                        WriteOptions::default(),
+                    )?;
+                    for batch in in_mem_batches {
+                        file_writer.write(&batch)?;
+                    }
+                    file_writer.finish()?;
+
+                    output_data = file_writer.into_inner();
+                    let partition_end = output_data.seek(SeekFrom::Current(0))?;
+                    let ipc_length: u64 = partition_end - partition_start;
+                    output_data.write_all(&ipc_length.to_le_bytes()[..])?;
+                    output_data.flush()?;
+                    offset = ipc_length + 8;
+                }
+
+                // append partition in each spills
+                for s in 0..output_spills.len() {
+                    let spill = &output_spills[s];
+                    let length = spill.offsets[i + 1] - spill.offsets[i];
+                    if length > 0 {
+                        let mut reader = &spill_files[s];
+                        reader.seek(SeekFrom::Start(spill.offsets[i]))?;
+                        let mut take = reader.take(length);
+                        std::io::copy(&mut take, &mut output_data)?;
+                        output_data.flush()?;
+                    }
+                    offset += length;
+                }
+            }
+            // add one extra offset at last to ease partition length computation
+            offsets[num_output_partitions] = offset;
+
+            let mut output_index = File::create(index_file_clone)?;
+            for offset in offsets {
+                output_index.write_all(&(offset as i64).to_le_bytes()[..])?;
+            }
+            output_index.flush()?;
+            Ok::<(), DataFusionError>(())
+        })
+        .await;
+
+        if let Err(e) = res {
+            return Err(DataFusionError::Execution(format!(
+                "Error occurred while writing shuffle output {}",
+                e
+            )));
+        };
+
+        self.memory_manager()
+            .release_exec_pool_memory(freed, partition)
+            .await;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("data", DataType::Utf8, false),
+            Field::new("index", DataType::Utf8, false),
+        ]));
+
+        let shuffle_result = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Utf8Array::<i32>::from([Some(data_file)])),
+                Arc::new(Utf8Array::<i32>::from([Some(index_file)])),
+            ],
+        )?;
+        Ok(Box::pin(MemoryStream::try_new(
+            vec![shuffle_result],
+            schema,
+            None,
+        )?))
+    }
 }
 
 /// consume the `buffered_partitions` and do spill into a single temp shuffle output file
@@ -303,12 +433,14 @@ async fn spill_into(
     let path = path.to_owned();
 
     let res = task::spawn_blocking(move || {
-        let mut length = vec![0; num_output_partitions];
+        let mut offset: u64 = 0;
+        let mut offsets = vec![0; num_output_partitions + 1];
         let mut file = OpenOptions::new().read(true).append(true).open(path)?;
 
         for i in 0..num_output_partitions {
             let partition_start = file.seek(SeekFrom::Current(0))?;
             let partition_batches = &output_batches[i];
+            offsets[i] = offset;
             if partition_batches.len() > 0 {
                 let mut file_writer =
                     FileWriter::try_new(file, &schema, WriteOptions::default())?;
@@ -322,12 +454,12 @@ async fn spill_into(
                 let ipc_length: u64 = partition_end - partition_start;
                 file.write_all(&ipc_length.to_le_bytes()[..])?;
                 file.flush()?;
-                length[i] = ipc_length + 8;
-            } else {
-                length[i] = 0;
+                offset = ipc_length + 8;
             }
         }
-        Ok(length)
+        // add one extra offset at last to ease partition length computation
+        offsets[num_output_partitions] = offset;
+        Ok(offsets)
     })
     .await;
 
@@ -367,9 +499,11 @@ impl MemoryConsumer for ShuffleRepartitioner {
 
     async fn spill_inner(
         &self,
-        size: usize,
-        trigger: &MemoryConsumerId,
+        _size: usize,
+        _trigger: &MemoryConsumerId,
     ) -> Result<usize> {
+        // TODO: make buffered_batches a memory consumer to allow spill while
+        // writing final output file
         if !self.insert_finished.load(Ordering::SeqCst) {
             let total_size = self.spill_while_inserting().await;
             total_size
@@ -401,4 +535,139 @@ impl MemoryConsumer for ShuffleRepartitioner {
     fn spilled_count_increment(&self) {
         self.spilled_count.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// The shuffle writer operator maps each input partition to M output partitions based on a
+/// partitioning scheme. No guarantees are made about the order of the resulting partitions.
+#[derive(Debug)]
+pub struct ShuffleWriterExec {
+    /// Input execution plan
+    input: Arc<dyn ExecutionPlan>,
+    /// Partitioning scheme to use
+    partitioning: Partitioning,
+    /// the shuffle id this map belongs to
+    shuffle_id: usize,
+}
+
+impl ShuffleWriterExec {
+    /// Input execution plan
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
+    /// Partitioning scheme to use
+    pub fn partitioning(&self) -> &Partitioning {
+        &self.partitioning
+    }
+}
+
+#[async_trait]
+impl ExecutionPlan for ShuffleWriterExec {
+    /// Return a reference to Any that can be used for downcasting
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    /// Get the schema for this execution plan
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
+
+    fn output_partitioning(&self) -> Partitioning {
+        self.partitioning.clone()
+    }
+
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+        vec![self.input.clone()]
+    }
+
+    fn with_new_children(
+        &self,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        match children.len() {
+            1 => Ok(Arc::new(ShuffleWriterExec::try_new(
+                children[0].clone(),
+                self.partitioning.clone(),
+                self.shuffle_id,
+            )?)),
+            _ => Err(DataFusionError::Internal(
+                "RepartitionExec wrong number of children".to_string(),
+            )),
+        }
+    }
+
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
+        let input = self.input.execute(partition).await?;
+        external_shuffle(
+            input,
+            partition,
+            self.shuffle_id,
+            self.partitioning.clone(),
+            RUNTIME_ENV.clone(),
+        )
+        .await
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        // Some(self.metrics.clone_inner())
+        None
+    }
+
+    fn fmt_as(
+        &self,
+        t: DisplayFormatType,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default => {
+                write!(f, "ShuffleWriterExec: partitioning={:?}", self.partitioning)
+            }
+        }
+    }
+
+    fn statistics(&self) -> Statistics {
+        self.input.statistics()
+    }
+}
+
+impl ShuffleWriterExec {
+    /// Create a new ShuffleWriterExec
+    pub fn try_new(
+        input: Arc<dyn ExecutionPlan>,
+        partitioning: Partitioning,
+        shuffle_id: usize,
+    ) -> Result<Self> {
+        Ok(ShuffleWriterExec {
+            input,
+            partitioning,
+            shuffle_id,
+        })
+    }
+}
+
+pub async fn external_shuffle(
+    mut input: SendableRecordBatchStream,
+    partition_id: usize,
+    shuffle_id: usize,
+    partitioning: Partitioning,
+    runtime: Arc<RuntimeEnv>,
+) -> Result<SendableRecordBatchStream> {
+    let schema = input.schema();
+    let repartitioner = Arc::new(ShuffleRepartitioner::new(
+        partition_id,
+        shuffle_id,
+        schema.clone(),
+        partitioning,
+        runtime.clone(),
+    ));
+    runtime.register_consumer(repartitioner.clone()).await;
+
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        repartitioner.insert_batch(batch).await?;
+    }
+
+    repartitioner.finish_insert();
+    repartitioner.shuffle_write().await
 }

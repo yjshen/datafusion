@@ -17,7 +17,7 @@
 
 //! Shuffle related
 
-pub mod shuffle_repartition;
+pub mod shuffle_output;
 
 use crate::error::{DataFusionError, Result};
 use arrow::error::Result as ArrowResult;

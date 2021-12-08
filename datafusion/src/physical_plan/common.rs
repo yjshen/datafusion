@@ -32,7 +32,6 @@ use futures::channel::mpsc;
 use futures::{SinkExt, Stream, StreamExt, TryStreamExt};
 use std::fs;
 use std::fs::{metadata, File};
-use std::io::BufWriter;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::task::JoinHandle;
@@ -289,7 +288,7 @@ pub fn batch_memory_size(rb: &RecordBatch) -> usize {
 /// Estimate buffer batch memory footprint
 /// TODO: it's now a stub without actually counting the size
 pub fn mutable_batch_memory_size(rb: &MutableRecordBatch) -> usize {
-    rb.arrays().iter().map(|a| 0).sum()
+    rb.arrays().iter().map(|_a| 0).sum()
 }
 
 #[cfg(test)]
