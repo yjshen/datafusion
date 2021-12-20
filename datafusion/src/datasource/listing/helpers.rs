@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use arrow::{
-    array::{Array, ArrayBuilder, ArrayRef, UInt64Array},
+    array::*,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -263,25 +263,23 @@ fn paths_to_batch(
     table_path: &str,
     metas: &[FileMeta],
 ) -> Result<RecordBatch> {
-    let mut key_builder = MutableUtf8Array::new(metas.len());
-    let mut length_builder = MutableUInt64::new(metas.len());
-    let mut modified_builder = MutableInt64Array::new(metas.len());
+    let mut key_builder = MutableUtf8Array::with_capacity(metas.len());
+    let mut length_builder = MutablePrimitiveArray::<u64>::with_capacity(metas.len());
+    let mut modified_builder = MutablePrimitiveArray::<i64>::with_capacity(metas.len());
     let mut partition_builders = table_partition_cols
         .iter()
-        .map(|_| MutableUtf8Array::new(metas.len()))
+        .map(|_| MutableUtf8Array::with_capacity(metas.len()))
         .collect::<Vec<_>>();
     for file_meta in metas {
         if let Some(partition_values) =
             parse_partitions_for_path(table_path, file_meta.path(), table_partition_cols)
         {
-            key_builder.append_value(file_meta.path())?;
-            length_builder.append_value(file_meta.size())?;
-            match file_meta.last_modified {
-                Some(lm) => modified_builder.append_value(lm.timestamp_millis())?,
-                None => modified_builder.append_null()?,
-            }
+            key_builder.push(Some(file_meta.path()))?;
+            length_builder.push(Some(file_meta.size()))?;
+            modified_builder
+                .push(file_meta.last_modified.map(|lm| lm.timestamp_millis()));
             for (i, part_val) in partition_values.iter().enumerate() {
-                partition_builders[i].append_value(part_val)?;
+                partition_builders[i].push(Some(part_val))?;
             }
         } else {
             debug!("No partitioning for path {}", file_meta.path());
@@ -289,13 +287,13 @@ fn paths_to_batch(
     }
 
     // finish all builders
-    let mut col_arrays: Vec<ArrayRef> = vec![
-        ArrayBuilder::finish(&mut key_builder),
-        ArrayBuilder::finish(&mut length_builder),
-        ArrayBuilder::finish(&mut modified_builder),
+    let mut col_arrays: Vec<Arc<dyn Array>> = vec![
+        key_builder.into_arc(),
+        length_builder.into_arc(),
+        modified_builder.into_arc().to(DataType::Date64),
     ];
     for mut partition_builder in partition_builders {
-        col_arrays.push(ArrayBuilder::finish(&mut partition_builder));
+        col_arrays.push(partition_builder.into_arc());
     }
 
     // put the schema together
