@@ -25,15 +25,16 @@ mod parquet;
 
 pub use self::parquet::ParquetExec;
 use arrow::{
-    array::{ArrayData, ArrayRef, DictionaryArray, UInt8BufferBuilder},
+    array::{ArrayRef, DictionaryArray, DictionaryKey, PrimitiveArray},
     buffer::Buffer,
-    datatypes::{DataType, Field, Schema, SchemaRef, UInt8Type},
+    datatypes::{DataType, Field, Schema, SchemaRef},
     error::{ArrowError, Result as ArrowResult},
     record_batch::RecordBatch,
 };
 pub use avro::AvroExec;
 pub use csv::CsvExec;
 pub use json::NdJsonExec;
+use std::iter;
 
 use crate::{
     datasource::{object_store::ObjectStore, PartitionedFile},
@@ -233,7 +234,7 @@ impl PartitionColumnProjector {
             cols.insert(
                 sidx,
                 create_dict_array(
-                    &mut self.key_buffer_cache,
+                    &mut self.key_array_cache,
                     &partition_values[pidx],
                     file_batch.num_rows(),
                 ),
@@ -244,7 +245,7 @@ impl PartitionColumnProjector {
 }
 
 fn create_dict_array(
-    key_buffer_cache: &mut Option<Buffer>,
+    key_array_cache: &mut Option<Buffer>,
     val: &ScalarValue,
     len: usize,
 ) -> ArrayRef {
@@ -252,27 +253,16 @@ fn create_dict_array(
     let dict_vals = val.to_array();
 
     // build keys array
-    let sliced_key_buffer = match key_buffer_cache {
+    let sliced_keys = match key_array_cache {
         Some(buf) if buf.len() >= len => buf.slice(buf.len() - len),
-        _ => {
-            let mut key_buffer_builder = UInt8BufferBuilder::new(len);
-            key_buffer_builder.advance(len); // keys are all 0
-            key_buffer_cache.insert(key_buffer_builder.finish()).clone()
-        }
+        _ => key_array_cache
+            .insert(PrimitiveArray::<u8>::from_data(iter::repeat(0).take(len)))
+            .clone(),
     };
-
-    // create data type
-    let data_type =
-        DataType::Dictionary(Box::new(DataType::UInt8), Box::new(val.get_datatype()));
-
-    debug_assert_eq!(data_type, *DEFAULT_PARTITION_COLUMN_DATATYPE);
-
-    // assemble pieces together
-    let mut builder = ArrayData::builder(data_type)
-        .len(len)
-        .add_buffer(sliced_key_buffer);
-    builder = builder.add_child_data(dict_vals.data().clone());
-    Arc::new(DictionaryArray::<UInt8Type>::from(builder.build().unwrap()))
+    Arc::new(DictionaryArray::<DictionaryKey::Uint8>::from_data(
+        sliced_keys,
+        dict_vals,
+    ))
 }
 
 #[cfg(test)]

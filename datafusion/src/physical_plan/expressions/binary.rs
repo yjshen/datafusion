@@ -556,9 +556,9 @@ where
         .collect())
 }
 
-fn is_distinct_from_utf8<OffsetSize: StringOffsetSizeTrait>(
-    left: &GenericStringArray<OffsetSize>,
-    right: &GenericStringArray<OffsetSize>,
+fn is_distinct_from_utf8<T: Offset>(
+    left: &Utf8Array<T>,
+    right: &Utf8Array<T>,
 ) -> Result<BooleanArray> {
     Ok(left
         .iter()
@@ -581,9 +581,9 @@ where
         .collect())
 }
 
-fn is_not_distinct_from_utf8<OffsetSize: StringOffsetSizeTrait>(
-    left: &GenericStringArray<OffsetSize>,
-    right: &GenericStringArray<OffsetSize>,
+fn is_not_distinct_from_utf8<T: Offset>(
+    left: &Utf8Array<T>,
+    right: &Utf8Array<T>,
 ) -> Result<BooleanArray> {
     Ok(left
         .iter()
