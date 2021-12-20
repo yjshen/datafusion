@@ -161,10 +161,10 @@ impl<F: FormatReaderOpener> Stream for FileStream<F> {
                         let len = *remain;
                         *remain = 0;
                         Some(Ok(RecordBatch::try_new(
-                            item.schema(),
+                            item.schema().clone(),
                             item.columns()
                                 .iter()
-                                .map(|column| column.slice(0, len))
+                                .map(|column| column.slice(0, len).into())
                                 .collect(),
                         )?))
                     }

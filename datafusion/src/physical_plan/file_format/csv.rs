@@ -22,8 +22,8 @@ use crate::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream, Statistics,
 };
 
-use arrow::csv;
 use arrow::datatypes::SchemaRef;
+use arrow::io::csv;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -116,7 +116,7 @@ impl ExecutionPlan for CsvExec {
 
         let fun = move |file, remaining: &Option<usize>| {
             let bounds = remaining.map(|x| (0, x + start_line));
-            Box::new(csv::Reader::new(
+            Box::new(csv::read::Reader::new(
                 file,
                 Arc::clone(&file_schema),
                 has_header,

@@ -20,10 +20,7 @@
 use std::sync::Arc;
 
 use arrow::{
-    array::{
-        Array, ArrayBuilder, ArrayRef, Date64Array, Date64Builder, StringArray,
-        StringBuilder, UInt64Array, UInt64Builder,
-    },
+    array::{Array, ArrayBuilder, ArrayRef, UInt64Array},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -266,12 +263,12 @@ fn paths_to_batch(
     table_path: &str,
     metas: &[FileMeta],
 ) -> Result<RecordBatch> {
-    let mut key_builder = StringBuilder::new(metas.len());
-    let mut length_builder = UInt64Builder::new(metas.len());
-    let mut modified_builder = Date64Builder::new(metas.len());
+    let mut key_builder = MutableUtf8Array::new(metas.len());
+    let mut length_builder = MutableUInt64::new(metas.len());
+    let mut modified_builder = MutableInt64Array::new(metas.len());
     let mut partition_builders = table_partition_cols
         .iter()
-        .map(|_| StringBuilder::new(metas.len()))
+        .map(|_| MutableUtf8Array::new(metas.len()))
         .collect::<Vec<_>>();
     for file_meta in metas {
         if let Some(partition_values) =
@@ -323,7 +320,7 @@ fn batches_to_paths(batches: &[RecordBatch]) -> Vec<PartitionedFile> {
             let key_array = batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<StringArray>()
+                .downcast_ref::<Utf8Array<i32>>()
                 .unwrap();
             let length_array = batch
                 .column(1)
@@ -333,7 +330,7 @@ fn batches_to_paths(batches: &[RecordBatch]) -> Vec<PartitionedFile> {
             let modified_array = batch
                 .column(2)
                 .as_any()
-                .downcast_ref::<Date64Array>()
+                .downcast_ref::<Int64Array>()
                 .unwrap();
 
             (0..batch.num_rows()).map(move |row| PartitionedFile {

@@ -23,7 +23,6 @@ use std::fmt;
 use std::sync::Arc;
 use std::{any::Any, convert::TryInto};
 
-use crate::datasource::file_format::parquet::ChunkObjectReader;
 use crate::datasource::object_store::ObjectStore;
 use crate::datasource::PartitionedFile;
 use crate::{
@@ -153,32 +152,6 @@ impl ParquetFileMetrics {
 }
 
 type Payload = ArrowResult<RecordBatch>;
-
-#[allow(dead_code)]
-fn producer_task(
-    path: &str,
-    response_tx: Sender<Payload>,
-    projection: &[usize],
-    limit: usize,
-) -> Result<()> {
-    let reader = File::open(path)?;
-    let reader = std::io::BufReader::new(reader);
-
-    let reader = read::RecordReader::try_new(
-        reader,
-        Some(projection.to_vec()),
-        Some(limit),
-        None,
-        None,
-    )?;
-
-    for batch in reader {
-        response_tx
-            .blocking_send(batch)
-            .map_err(|x| DataFusionError::Execution(format!("{}", x)))?;
-    }
-    Ok(())
-}
 
 #[async_trait]
 impl ExecutionPlan for ParquetExec {

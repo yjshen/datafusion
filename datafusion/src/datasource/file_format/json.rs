@@ -23,8 +23,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use arrow::datatypes::SchemaRef;
-use arrow::json::reader::infer_json_schema_from_iterator;
-use arrow::json::reader::ValueIter;
+use arrow::io::json;
 use async_trait::async_trait;
 use futures::StreamExt;
 
@@ -60,18 +59,10 @@ impl FileFormat for JsonFormat {
 
     async fn infer_schema(&self, mut readers: ObjectReaderStream) -> Result<SchemaRef> {
         let mut schemas = Vec::new();
-        let mut records_to_read = self.schema_infer_max_rec.unwrap_or(usize::MAX);
+        let records_to_read = max_records.map(|x| x / filenames.len());
         while let Some(obj_reader) = readers.next().await {
             let mut reader = BufReader::new(obj_reader?.sync_reader()?);
-            let iter = ValueIter::new(&mut reader, None);
-            let schema = infer_json_schema_from_iterator(iter.take_while(|_| {
-                let should_take = records_to_read > 0;
-                records_to_read -= 1;
-                should_take
-            }))?;
-            if records_to_read == 0 {
-                break;
-            }
+            let schema = json::infer_json_schema(&mut reader, records_to_read)?;
             schemas.push(schema);
         }
 

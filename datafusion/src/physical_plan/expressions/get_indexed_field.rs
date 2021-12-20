@@ -26,7 +26,7 @@ use arrow::{
 };
 
 use crate::arrow::array::Array;
-use crate::arrow::compute::concat;
+use crate::arrow::compute::concatenate::concatenate;
 use crate::scalar::ScalarValue;
 use crate::{
     error::DataFusionError,
@@ -97,7 +97,7 @@ impl PhysicalExpr for GetIndexedFieldExpr {
                         .filter_map(|o| o.map(|list| list.slice(*i as usize, 1)))
                         .collect();
                     let vec = sliced_array.iter().map(|a| a.as_ref()).collect::<Vec<&dyn Array>>();
-                    let iter = concat(vec.as_slice()).unwrap();
+                    let iter = concatenate(vec.as_slice()).unwrap();
                     Ok(ColumnarValue::Array(iter))
                 }
                 (DataType::Struct(_), ScalarValue::Utf8(Some(k))) => {

@@ -21,6 +21,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema;
+use arrow::io::csv;
 use arrow::{self, datatypes::SchemaRef};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -96,18 +97,30 @@ impl FileFormat for CsvFormat {
         let mut records_to_read = self.schema_infer_max_rec.unwrap_or(std::usize::MAX);
 
         while let Some(obj_reader) = readers.next().await {
-            let mut reader = obj_reader?.sync_reader()?;
-            let (schema, records_read) = arrow::csv::reader::infer_reader_schema(
+            let mut reader = csv::read::ReaderBuilder::new()
+                .from_reader(obj_reader?.sync_reader()?)
+                .delimiter(self.delimiter)
+                .has_headers(self.has_header);
+
+            let schema = csv::read::infer_schema(
                 &mut reader,
-                self.delimiter,
                 Some(records_to_read),
                 self.has_header,
+                &csv::read::infer,
             )?;
-            if records_read == 0 {
-                continue;
-            }
+
+            // if records_read == 0 {
+            //     continue;
+            // }
+            // schemas.push(schema.clone());
+            // records_to_read -= records_read;
+            // if records_to_read == 0 {
+            //     break;
+            // }
+            //
+            // FIXME: return recods_read from infer_schema
             schemas.push(schema.clone());
-            records_to_read -= records_read;
+            records_to_read -= records_to_read;
             if records_to_read == 0 {
                 break;
             }

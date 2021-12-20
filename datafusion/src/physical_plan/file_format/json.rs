@@ -22,7 +22,8 @@ use crate::error::{DataFusionError, Result};
 use crate::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream, Statistics,
 };
-use arrow::{datatypes::SchemaRef, json};
+use arrow::datatypes::SchemaRef;
+use arrow::io::json;
 use std::any::Any;
 use std::sync::Arc;
 
