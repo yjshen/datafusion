@@ -39,6 +39,7 @@ use crate::{
     datasource::{object_store::ObjectStore, PartitionedFile},
     scalar::ScalarValue,
 };
+use arrow::array::UInt8Array;
 use lazy_static::lazy_static;
 use std::{
     collections::HashMap,
@@ -46,7 +47,6 @@ use std::{
     sync::Arc,
     vec,
 };
-use arrow::array::UInt8Array;
 
 use super::{ColumnStatistics, Statistics};
 
@@ -178,7 +178,7 @@ struct PartitionColumnProjector {
     /// An Arrow buffer initialized to zeros that represents the key array of all partition
     /// columns (partition columns are materialized by dictionary arrays with only one
     /// value in the dictionary, thus all the keys are equal to zero).
-    key_buffer_cache: Option<UInt8Array>,
+    key_array_cache: Option<UInt8Array>,
     /// Mapping between the indexes in the list of partition columns and the target
     /// schema. Sorted by index in the target schema so that we can iterate on it to
     /// insert the partition columns in the target record batch.
@@ -256,13 +256,12 @@ fn create_dict_array(
     let sliced_keys = match key_array_cache {
         Some(buf) if buf.len() >= len => buf.slice(0, len),
         _ => key_array_cache
-            .insert(UInt8Array::from_trusted_len_values_iter(iter::repeat(0).take(len)))
+            .insert(UInt8Array::from_trusted_len_values_iter(
+                iter::repeat(0).take(len),
+            ))
             .clone(),
     };
-    Arc::new(DictionaryArray::<u8>::from_data(
-        sliced_keys,
-        dict_vals,
-    ))
+    Arc::new(DictionaryArray::<u8>::from_data(sliced_keys, dict_vals))
 }
 
 #[cfg(test)]

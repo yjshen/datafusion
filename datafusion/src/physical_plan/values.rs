@@ -57,7 +57,7 @@ impl ValuesExec {
             schema
                 .fields()
                 .iter()
-                .map(|field| new_null_array(field.data_type(), 1))
+                .map(|field| new_null_array(field.data_type(), 1).into())
                 .collect::<Vec<_>>(),
         )?;
         let arr = (0..n_col)

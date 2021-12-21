@@ -34,6 +34,40 @@ use super::coercion::{
 use arrow::scalar::Scalar;
 use arrow::types::NativeType;
 
+// Simple (low performance) kernels until optimized kernels are added to arrow
+// See https://github.com/apache/arrow-rs/issues/960
+
+fn is_distinct_from_bool(left: &dyn Array, right: &dyn Array) -> BooleanArray {
+    // Different from `neq_bool` because `null is distinct from null` is false and not null
+    let left = left
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("distinct_from op failed to downcast to boolean array");
+    let right = right
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("distinct_from op failed to downcast to boolean array");
+    left.iter()
+        .zip(right.iter())
+        .map(|(left, right)| Some(left != right))
+        .collect()
+}
+
+fn is_not_distinct_from_bool(left: &dyn Array, right: &dyn Array) -> BooleanArray {
+    let left = left
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("not_distinct_from op failed to downcast to boolean array");
+    let right = right
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("not_distinct_from op failed to downcast to boolean array");
+    left.iter()
+        .zip(right.iter())
+        .map(|(left, right)| Some(left == right))
+        .collect()
+}
+
 /// Binary expression
 #[derive(Debug)]
 pub struct BinaryExpr {
@@ -142,9 +176,9 @@ fn evaluate(lhs: &dyn Array, op: &Operator, rhs: &dyn Array) -> Result<Arc<dyn A
         };
         Ok(Arc::new(arr) as Arc<dyn Array>)
     } else if matches!(op, IsDistinctFrom) {
-        boolean_op!(lhs, rhs, is_distinct_from)
+        is_distinct_from(lhs, rhs)
     } else if matches!(op, IsNotDistinctFrom) {
-        boolean_op!(lhs, rhs, is_not_distinct_from)
+        is_not_distinct_from(lhs, rhs)
     } else if matches!(op, Or) {
         boolean_op!(lhs, rhs, compute::boolean_kleene::or)
     } else if matches!(op, And) {
@@ -543,26 +577,110 @@ impl PhysicalExpr for BinaryExpr {
     }
 }
 
-fn is_distinct_from<T: NativeType>(
-    left: &PrimitiveArray<T>,
-    right: &PrimitiveArray<T>,
-) -> Result<BooleanArray> {
-    Ok(left
-        .iter()
+fn is_distinct_from_primitive<T: NativeType>(
+    left: &dyn Array,
+    right: &dyn Array,
+) -> BooleanArray {
+    let left = left
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .expect("distinct_from op failed to downcast to primitive array");
+    let right = right
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .expect("distinct_from op failed to downcast to primitive array");
+    left.iter()
         .zip(right.iter())
         .map(|(x, y)| Some(x != y))
-        .collect())
+        .collect()
 }
 
-fn is_not_distinct_from<T: NativeType>(
-    left: &PrimitiveArray<T>,
-    right: &PrimitiveArray<T>,
-) -> Result<BooleanArray> {
-    Ok(left
-        .iter()
+fn is_not_distinct_from_primitive<T: NativeType>(
+    left: &dyn Array,
+    right: &dyn Array,
+) -> BooleanArray {
+    let left = left
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .expect("not_distinct_from op failed to downcast to primitive array");
+    let right = right
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .expect("not_distinct_from op failed to downcast to primitive array");
+    left.iter()
         .zip(right.iter())
         .map(|(x, y)| Some(x == y))
-        .collect())
+        .collect()
+}
+
+fn is_distinct_from(left: &dyn Array, right: &dyn Array) -> Result<Arc<dyn Array>> {
+    match (left.data_type(), right.data_type()) {
+        (DataType::Int8, DataType::Int8) => {
+            Ok(Arc::new(is_distinct_from_primitive::<i8>(left, right)))
+        }
+        (DataType::Int32, DataType::Int32) => {
+            Ok(Arc::new(is_distinct_from_primitive::<i32>(left, right)))
+        }
+        (DataType::Int64, DataType::Int64) => {
+            Ok(Arc::new(is_distinct_from_primitive::<i64>(left, right)))
+        }
+        (DataType::UInt8, DataType::UInt8) => {
+            Ok(Arc::new(is_distinct_from_primitive::<u8>(left, right)))
+        }
+        (DataType::UInt16, DataType::UInt16) => {
+            Ok(Arc::new(is_distinct_from_primitive::<u16>(left, right)))
+        }
+        (DataType::UInt32, DataType::UInt32) => {
+            Ok(Arc::new(is_distinct_from_primitive::<u32>(left, right)))
+        }
+        (DataType::UInt64, DataType::UInt64) => {
+            Ok(Arc::new(is_distinct_from_primitive::<u64>(left, right)))
+        }
+        (DataType::Float32, DataType::Float32) => {
+            Ok(Arc::new(is_distinct_from_primitive::<f32>(left, right)))
+        }
+        (DataType::Float64, DataType::Float64) => {
+            Ok(Arc::new(is_distinct_from_primitive::<f64>(left, right)))
+        }
+        (DataType::Boolean, DataType::Boolean) => {
+            Ok(Arc::new(is_distinct_from_bool(left, right)))
+        }
+    }
+}
+
+fn is_not_distinct_from(left: &dyn Array, right: &dyn Array) -> Result<Arc<dyn Array>> {
+    match (left.data_type(), right.data_type()) {
+        (DataType::Int8, DataType::Int8) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<i8>(left, right)))
+        }
+        (DataType::Int32, DataType::Int32) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<i32>(left, right)))
+        }
+        (DataType::Int64, DataType::Int64) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<i64>(left, right)))
+        }
+        (DataType::UInt8, DataType::UInt8) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<u8>(left, right)))
+        }
+        (DataType::UInt16, DataType::UInt16) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<u16>(left, right)))
+        }
+        (DataType::UInt32, DataType::UInt32) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<u32>(left, right)))
+        }
+        (DataType::UInt64, DataType::UInt64) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<u64>(left, right)))
+        }
+        (DataType::Float32, DataType::Float32) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<f32>(left, right)))
+        }
+        (DataType::Float64, DataType::Float64) => {
+            Ok(Arc::new(is_not_distinct_from_primitive::<f64>(left, right)))
+        }
+        (DataType::Boolean, DataType::Boolean) => {
+            Ok(Arc::new(is_not_distinct_from_bool(left, right)))
+        }
+    }
 }
 
 /// return two physical expressions that are optionally coerced to a

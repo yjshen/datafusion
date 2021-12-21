@@ -687,8 +687,8 @@ fn build_join_indexes(
                             &keys_values,
                             *null_equals_null,
                         )? {
-                            left_indices.append(i);
-                            right_indices.append(row as u32);
+                            left_indices.push(i);
+                            right_indices.push(row as u32);
                         }
                     }
                 }
@@ -725,8 +725,8 @@ fn build_join_indexes(
                             &keys_values,
                             *null_equals_null,
                         )? {
-                            left_indices.append_value(i)?;
-                            right_indices.append_value(row as u32)?;
+                            left_indices.push(i);
+                            right_indices.push(row as u32);
                         }
                     }
                 };
@@ -846,7 +846,7 @@ fn equal_rows(
             }
             DataType::Timestamp(_, None) => {
                 equal_rows_elem!(Int64Array, l, r, left, right, null_equals_null)
-            },
+            }
             DataType::Utf8 => {
                 equal_rows_elem!(StringArray, l, r, left, right, null_equals_null)
             }
