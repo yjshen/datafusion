@@ -35,6 +35,8 @@ use crate::error::{DataFusionError, Result};
 
 trait ReadSeek: Read + Seek {}
 
+impl<R: Read + Seek> ReadSeek for std::io::BufReader<R> {}
+
 /// Object Reader for one file in an object store.
 ///
 /// Note that the dynamic dispatch on the reader might
@@ -50,12 +52,10 @@ pub trait ObjectReader: Send + Sync {
         &self,
         start: u64,
         length: usize,
-    ) -> Result<Box<dyn ReadSeek + Send + Sync>>;
+    ) -> Result<Box<dyn Read + Send + Sync>>;
 
     /// Get reader for the entire file
-    fn sync_reader(&self) -> Result<Box<dyn ReadSeek + Send + Sync>> {
-        self.sync_chunk_reader(0, self.length() as usize)
-    }
+    fn sync_reader(&self) -> Result<Box<dyn ReadSeek + Send + Sync>>;
 
     /// Get the size of the file
     fn length(&self) -> u64;
