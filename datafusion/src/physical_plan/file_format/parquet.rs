@@ -475,11 +475,7 @@ mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field};
     use futures::StreamExt;
-    use parquet::{
-        basic::Type as PhysicalType,
-        file::{metadata::RowGroupMetaData, statistics::Statistics as ParquetStatistics},
-        schema::types::SchemaDescPtr,
-    };
+    use parquet::{basic::Type as PhysicalType, schema::types::SchemaDescPtr};
 
     #[tokio::test]
     async fn parquet_exec_with_projection() -> Result<()> {
