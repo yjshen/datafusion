@@ -4120,7 +4120,7 @@ mod tests {
                     schema_ref,
                     options,
                     vec![Encoding::Plain],
-                )?;
+                );
 
                 let _ = write_file(
                     &mut file,

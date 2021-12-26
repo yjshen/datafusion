@@ -6037,7 +6037,7 @@ async fn query_get_indexed_field() -> Result<()> {
     let mut array =
         MutableListArray::<i32, MutablePrimitiveArray<i64>>::with_capacity(rows.len());
     for int_vec in rows {
-        array.try_push(int_vec);
+        array.try_push(Some(int_vec))?;
     }
 
     let data = RecordBatch::try_new(schema.clone(), vec![array.into_arc()])?;
@@ -6077,7 +6077,11 @@ async fn query_nested_get_indexed_field() -> Result<()> {
         MutableListArray<i32, MutablePrimitiveArray<i64>>,
     >::with_capacity(rows.len());
     for int_vec_vec in rows.into_iter() {
-        array.try_push(int_vec_vec.map(|v| Some(v.map(Some))));
+        array.try_push(Some(
+            int_vec_vec
+                .into_iter()
+                .map(|v| Some(v.into_iter().map(Some))),
+        ))?;
     }
 
     let data = RecordBatch::try_new(schema.clone(), vec![array.into_arc()])?;
@@ -6125,11 +6129,11 @@ async fn query_nested_get_indexed_field_on_struct() -> Result<()> {
     let mut list_array =
         MutableListArray::<i32, MutablePrimitiveArray<i64>>::with_capacity(rows.len());
     for int_vec in rows.into_iter() {
-        list_array.try_push(int_vec.map(Some))
+        list_array.try_push(Some(int_vec.into_iter().map(Some)))?;
     }
-    let array = StructArray::from_data(dt, vec![list_array.into_arc()]);
+    let array = StructArray::from_data(dt, vec![list_array.into_arc()], None);
 
-    let data = RecordBatch::try_new(schema.clone(), vec![array.into_arc()])?;
+    let data = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])?;
     let table = MemTable::try_new(schema, vec![vec![data]])?;
     let table_a = Arc::new(table);
 

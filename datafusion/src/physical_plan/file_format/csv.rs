@@ -406,9 +406,9 @@ mod tests {
         let columns = batch
             .columns()
             .iter()
-            .map(|column| column.slice(offset, length))
+            .map(|column| column.slice(offset, length).into())
             .collect();
 
-        Self { schema, columns }
+        RecordBatch::try_new(schema, columns).unwrap()
     }
 }

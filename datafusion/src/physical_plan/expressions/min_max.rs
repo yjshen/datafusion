@@ -567,8 +567,7 @@ mod tests {
         let result = min_batch(&array)?;
         assert_eq!(ScalarValue::Decimal128(None, 10, 0), result);
 
-        let array: ArrayRef =
-            Arc::new(Int128Array::new_empty().to(DataType::Decimal(10, 0)));
+        let array: ArrayRef = Arc::new(Int128Array::new_empty(DataType::Decimal(10, 0)));
         let result = min_batch(&array)?;
         assert_eq!(ScalarValue::Decimal128(None, 10, 0), result);
 

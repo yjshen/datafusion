@@ -189,9 +189,9 @@ mod tests {
         let expr = col("l", &schema).unwrap();
         let batch = RecordBatch::try_new(
             Arc::new(schema),
-            vec![Arc::new(
-                ListArray::<i32, MutableUtf8Array<i32>>::new_empty(),
-            )],
+            vec![Arc::new(ListArray::<i32>::new_empty(
+                schema.field(0).data_type.clone(),
+            ))],
         )?;
         let key = ScalarValue::Int64(Some(0));
         let expr = Arc::new(GetIndexedFieldExpr::new(expr, key));
@@ -234,11 +234,11 @@ mod tests {
         fields: Vec<Field>,
         list_of_tuples: Vec<(Option<i64>, Vec<Option<&str>>)>,
     ) -> StructArray {
-        let foo_values = Vec::new();
+        let mut foo_values = Vec::new();
         let bar_array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
 
         for (int_value, list_value) in list_of_tuples {
-            foo_values.append(int_value);
+            foo_values.push(int_value);
             bar_array.try_push(Some(list_value)).unwrap();
         }
 

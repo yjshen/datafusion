@@ -195,14 +195,14 @@ pub fn table_with_decimal() -> Arc<dyn TableProvider> {
 }
 
 fn make_decimal() -> RecordBatch {
-    let mut decimal_builder = DecimalBuilder::new(20, 10, 3);
+    let mut data = Vec::new();
     for i in 110000..110010 {
-        decimal_builder.append_value(i as i128).unwrap();
+        data.push(Some(i as i128));
     }
     for i in 100000..100010 {
-        decimal_builder.append_value(-i as i128).unwrap();
+        data.push(Some(-i as i128));
     }
-    let array = decimal_builder.finish();
+    let array = PrimitiveArray::<i128>::from(data).to(DataType::Decimal(10, 3));
     let schema = Schema::new(vec![Field::new("c1", array.data_type().clone(), true)]);
     RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap()
 }

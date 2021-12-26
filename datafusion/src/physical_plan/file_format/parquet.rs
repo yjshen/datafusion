@@ -477,7 +477,7 @@ mod tests {
     use arrow::io::parquet::write::to_parquet_schema;
     use futures::StreamExt;
     use parquet::metadata::{ColumnChunkMetaData, SchemaDescriptor};
-    use parquet::statistics::ParquetStatistics;
+    use parquet::statistics::Statistics as ParquetStatistics;
 
     #[tokio::test]
     async fn parquet_exec_with_projection() -> Result<()> {
@@ -584,6 +584,22 @@ mod tests {
         ParquetFileMetrics::new(0, "file.parquet", &metrics)
     }
 
+    fn parquet_primitive_column_stats<T: parquet::types::NativeType>(
+        column_descr: ColumnDescriptor,
+        min: Option<T>,
+        max: Option<T>,
+        distinct: Option<i64>,
+        nulls: i64,
+    ) -> ParquetPrimitiveStatistics<T> {
+        ParquetPrimitiveStatistics::<T> {
+            descriptor: column_descr,
+            min_value: min,
+            max_value: max,
+            null_count: Some(nulls),
+            distinct_count: distinct,
+        }
+    }
+
     #[test]
     fn row_group_predicate_builder_simple_expr() -> Result<()> {
         use crate::logical_plan::{col, lit};
@@ -595,11 +611,23 @@ mod tests {
         let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
-            vec![ParquetStatistics::int32(Some(1), Some(10), None, 0, false)],
+            vec![&parquet_primitive_column_stats::<i32>(
+                schema_descr.column(0),
+                Some(1),
+                Some(10),
+                None,
+                0,
+            )],
         );
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
-            vec![ParquetStatistics::int32(Some(11), Some(20), None, 0, false)],
+            vec![&parquet_primitive_column_stats::<i32>(
+                schema_descr.column(0),
+                Some(11),
+                Some(20),
+                None,
+                0,
+            )],
         );
         let row_group_metadata = vec![rgm1, rgm2];
         let row_group_predicate = build_row_group_predicate(
@@ -628,11 +656,23 @@ mod tests {
         let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
-            vec![ParquetStatistics::int32(None, None, None, 0, false)],
+            vec![&parquet_primitive_column_stats::<i32>(
+                schema_descr.column(0),
+                None,
+                None,
+                None,
+                0,
+            )],
         );
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
-            vec![ParquetStatistics::int32(Some(11), Some(20), None, 0, false)],
+            vec![&parquet_primitive_column_stats::<i32>(
+                schema_descr.column(0),
+                Some(11),
+                Some(20),
+                None,
+                0,
+            )],
         );
         let row_group_metadata = vec![rgm1, rgm2];
         let row_group_predicate = build_row_group_predicate(
@@ -668,15 +708,39 @@ mod tests {
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![
-                ParquetStatistics::int32(Some(1), Some(10), None, 0, false),
-                ParquetStatistics::int32(Some(1), Some(10), None, 0, false),
+                &parquet_primitive_column_stats::<i32>(
+                    schema_descr.column(0),
+                    Some(1),
+                    Some(10),
+                    None,
+                    0,
+                ),
+                &parquet_primitive_column_stats::<i32>(
+                    schema_descr.column(0),
+                    Some(1),
+                    Some(10),
+                    None,
+                    0,
+                ),
             ],
         );
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
             vec![
-                ParquetStatistics::int32(Some(11), Some(20), None, 0, false),
-                ParquetStatistics::int32(Some(11), Some(20), None, 0, false),
+                &parquet_primitive_column_stats::<i32>(
+                    schema_descr.column(0),
+                    Some(11),
+                    Some(20),
+                    None,
+                    0,
+                ),
+                &parquet_primitive_column_stats::<i32>(
+                    schema_descr.column(0),
+                    Some(11),
+                    Some(20),
+                    None,
+                    0,
+                ),
             ],
         );
         let row_group_metadata = vec![rgm1, rgm2];
@@ -732,15 +796,37 @@ mod tests {
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![
-                ParquetStatistics::int32(Some(1), Some(10), None, 0, false),
-                ParquetStatistics::boolean(Some(false), Some(true), None, 0, false),
+                &parquet_primitive_column_stats::<i32>(
+                    schema_descr.column(0),
+                    Some(1),
+                    Some(10),
+                    None,
+                    0,
+                ),
+                &ParquetBooleanStatistics {
+                    min_value: Some(false),
+                    max_value: Some(true),
+                    distinct_count: None,
+                    null_count: Some(0),
+                },
             ],
         );
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
             vec![
-                ParquetStatistics::int32(Some(11), Some(20), None, 0, false),
-                ParquetStatistics::boolean(Some(false), Some(true), None, 0, false),
+                &parquet_primitive_column_stats::<i32>(
+                    schema_descr.column(0),
+                    Some(11),
+                    Some(20),
+                    None,
+                    0,
+                ),
+                &ParquetBooleanStatistics {
+                    min_value: Some(false),
+                    max_value: Some(true),
+                    distinct_count: None,
+                    null_count: Some(0),
+                },
             ],
         );
         let row_group_metadata = vec![rgm1, rgm2];
@@ -764,21 +850,58 @@ mod tests {
 
     fn get_row_group_meta_data(
         schema_descr: &SchemaDescriptor,
-        column_statistics: Vec<ParquetStatistics>,
+        column_statistics: Vec<&dyn ParquetStatistics>,
     ) -> RowGroupMetaData {
+        use parquet::schema::types::{physical_type_to_type, ParquetType};
+        use parquet_format_async_temp::{ColumnChunk, ColumnMetaData};
+
         let mut columns = vec![];
-        for (i, s) in column_statistics.iter().enumerate() {
-            let column = ColumnChunkMetaData::builder(schema_descr.column(i))
-                .set_statistics(s.clone())
-                .build()
-                .unwrap();
+        for (i, s) in column_statistics.into_iter().enumerate() {
+            let type_ = match column_descr.type_() {
+                ParquetType::PrimitiveType { physical_type, .. } => {
+                    physical_type_to_type(&physical_type).0
+                }
+                _ => {
+                    panic!("Trying to write a row group of a non-physical type")
+                }
+            };
+            let column_descr = schema_descr.column(i);
+            let column_chunk = ColumnChunk {
+                file_path: None,
+                file_offset: 0,
+                meta_data: Some(ColumnMetaData::new(
+                    type_,
+                    Vec::new(),
+                    column_descr.path_in_schema().to_vec(),
+                    parquet::compression::Compression::Uncompressed.into(),
+                    0,
+                    0,
+                    0,
+                    None,
+                    0,
+                    None,
+                    None,
+                    Some(parquet::statistics::serialize_statistics(s)),
+                    None,
+                    None,
+                )),
+                offset_index_offset: None,
+                offset_index_length: None,
+                column_index_offset: None,
+                column_index_length: None,
+                crypto_metadata: None,
+                encrypted_column_metadata: None,
+            };
+            let column = ColumnChunkMetaData {
+                column_descr: column_descr.clone(),
+                column_chunk,
+            };
             columns.push(column);
         }
-        RowGroupMetaData::builder(schema_descr.clone())
-            .set_num_rows(1000)
-            .set_total_byte_size(2000)
-            .set_column_metadata(columns)
-            .build()
-            .unwrap()
+        RowGroupMetaData {
+            columns,
+            num_rows: 1000,
+            total_byte_size: 2000,
+        }
     }
 }
