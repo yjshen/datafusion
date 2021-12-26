@@ -5738,12 +5738,12 @@ async fn join_tables_with_duplicated_column_name_not_in_on_constraint() -> Resul
         ),
     ])
     .unwrap();
-    let countries = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
+    let countries = MemTable::try_new(batch.schema().clone(), vec![vec![batch]])?;
 
     let batch = RecordBatch::try_from_iter(vec![
         (
             "id",
-            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7])) as _,
+            Arc::new(Int32Array::from_slice(vec![1, 2, 3, 4, 5, 6, 7])) as _,
         ),
         (
             "city",
@@ -5763,7 +5763,7 @@ async fn join_tables_with_duplicated_column_name_not_in_on_constraint() -> Resul
         ),
     ])
     .unwrap();
-    let cities = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
+    let cities = MemTable::try_new(batch.schema().clone(), vec![vec![batch]])?;
 
     let mut ctx = ExecutionContext::new();
     ctx.register_table("countries", Arc::new(countries))?;

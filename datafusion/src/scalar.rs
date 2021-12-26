@@ -1895,7 +1895,9 @@ mod tests {
             ScalarValue::Decimal128(Some(3), 10, 2),
             ScalarValue::Decimal128(None, 10, 2),
         ];
-        let array = ScalarValue::iter_to_array(decimal_vec.into_iter()).unwrap();
+        let array: ArrayRef = ScalarValue::iter_to_array(decimal_vec.into_iter())
+            .unwrap()
+            .into();
         assert_eq!(4, array.len());
         assert_eq!(DataType::Decimal(10, 2), array.data_type().clone());
 
@@ -2557,7 +2559,7 @@ mod tests {
                 ),
             ]),
         ];
-        let array = ScalarValue::iter_to_array(scalars).unwrap();
+        let array: ArrayRef = ScalarValue::iter_to_array(scalars).unwrap().into();
 
         let expected = Arc::new(StructArray::from_data(
             dt,
@@ -2634,16 +2636,22 @@ mod tests {
             ScalarValue::iter_to_array(vec![s0.clone(), s1.clone(), s2.clone()]).unwrap();
         let array = array.as_any().downcast_ref::<StructArray>().unwrap();
 
+        let int_data = vec![
+            Some(vec![Some(1), Some(2), Some(3)]),
+            Some(vec![Some(4), Some(5)]),
+            Some(vec![Some(6)]),
+        ];
+        let mut primitive_expected =
+            MutableListArray::<i32, MutablePrimitiveArray<i32>>::new();
+        primitive_expected.try_extend(int_data).unwrap();
+        let primitive_expected: ListArray<i32> = expected.into();
+
         let expected = StructArray::from_data(
             s0.get_datatype(),
             vec![
                 Arc::new(StringArray::from_slice(&["First", "Second", "Third"]))
                     as ArrayRef,
-                Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
-                    Some(vec![Some(1), Some(2), Some(3)]),
-                    Some(vec![Some(4), Some(5)]),
-                    Some(vec![Some(6)]),
-                ])),
+                primitive_expected,
             ],
             None,
         );

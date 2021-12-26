@@ -474,8 +474,10 @@ mod tests {
 
     use super::*;
     use arrow::datatypes::{DataType, Field};
+    use arrow::io::parquet::write::to_parquet_schema;
     use futures::StreamExt;
-    use parquet::{basic::Type as PhysicalType, schema::types::SchemaDescPtr};
+    use parquet::metadata::{ColumnChunkMetaData, SchemaDescriptor};
+    use parquet::statistics::ParquetStatistics;
 
     #[tokio::test]
     async fn parquet_exec_with_projection() -> Result<()> {
@@ -590,7 +592,7 @@ mod tests {
         let schema = Schema::new(vec![Field::new("c1", DataType::Int32, false)]);
         let predicate_builder = PruningPredicate::try_new(&expr, Arc::new(schema))?;
 
-        let schema_descr = get_test_schema_descr(vec![("c1", PhysicalType::INT32)]);
+        let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![ParquetStatistics::int32(Some(1), Some(10), None, 0, false)],
@@ -608,7 +610,7 @@ mod tests {
         let row_group_filter = row_group_metadata
             .iter()
             .enumerate()
-            .map(|(i, g)| row_group_predicate(g, i))
+            .map(|(i, g)| row_group_predicate(i, g))
             .collect::<Vec<_>>();
         assert_eq!(row_group_filter, vec![false, true]);
 
@@ -623,7 +625,7 @@ mod tests {
         let schema = Schema::new(vec![Field::new("c1", DataType::Int32, false)]);
         let predicate_builder = PruningPredicate::try_new(&expr, Arc::new(schema))?;
 
-        let schema_descr = get_test_schema_descr(vec![("c1", PhysicalType::INT32)]);
+        let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![ParquetStatistics::int32(None, None, None, 0, false)],
@@ -641,7 +643,7 @@ mod tests {
         let row_group_filter = row_group_metadata
             .iter()
             .enumerate()
-            .map(|(i, g)| row_group_predicate(g, i))
+            .map(|(i, g)| row_group_predicate(i, g))
             .collect::<Vec<_>>();
         // missing statistics for first row group mean that the result from the predicate expression
         // is null / undefined so the first row group can't be filtered out
@@ -662,10 +664,7 @@ mod tests {
         ]));
         let predicate_builder = PruningPredicate::try_new(&expr, schema.clone())?;
 
-        let schema_descr = get_test_schema_descr(vec![
-            ("c1", PhysicalType::INT32),
-            ("c2", PhysicalType::INT32),
-        ]);
+        let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![
@@ -689,7 +688,7 @@ mod tests {
         let row_group_filter = row_group_metadata
             .iter()
             .enumerate()
-            .map(|(i, g)| row_group_predicate(g, i))
+            .map(|(i, g)| row_group_predicate(i, g))
             .collect::<Vec<_>>();
         // the first row group is still filtered out because the predicate expression can be partially evaluated
         // when conditions are joined using AND
@@ -707,7 +706,7 @@ mod tests {
         let row_group_filter = row_group_metadata
             .iter()
             .enumerate()
-            .map(|(i, g)| row_group_predicate(g, i))
+            .map(|(i, g)| row_group_predicate(i, g))
             .collect::<Vec<_>>();
         assert_eq!(row_group_filter, vec![true, true]);
 
@@ -729,10 +728,7 @@ mod tests {
         ]));
         let predicate_builder = PruningPredicate::try_new(&expr, schema)?;
 
-        let schema_descr = get_test_schema_descr(vec![
-            ("c1", PhysicalType::INT32),
-            ("c2", PhysicalType::BOOLEAN),
-        ]);
+        let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![
@@ -756,7 +752,7 @@ mod tests {
         let row_group_filter = row_group_metadata
             .iter()
             .enumerate()
-            .map(|(i, g)| row_group_predicate(g, i))
+            .map(|(i, g)| row_group_predicate(i, g))
             .collect::<Vec<_>>();
         // no row group is filtered out because the predicate expression can't be evaluated
         // when a null array is generated for a statistics column,
@@ -767,10 +763,9 @@ mod tests {
     }
 
     fn get_row_group_meta_data(
-        schema_descr: &SchemaDescPtr,
+        schema_descr: &SchemaDescriptor,
         column_statistics: Vec<ParquetStatistics>,
     ) -> RowGroupMetaData {
-        use parquet::file::metadata::ColumnChunkMetaData;
         let mut columns = vec![];
         for (i, s) in column_statistics.iter().enumerate() {
             let column = ColumnChunkMetaData::builder(schema_descr.column(i))
@@ -785,21 +780,5 @@ mod tests {
             .set_column_metadata(columns)
             .build()
             .unwrap()
-    }
-
-    fn get_test_schema_descr(fields: Vec<(&str, PhysicalType)>) -> SchemaDescPtr {
-        use parquet::schema::types::{SchemaDescriptor, Type as SchemaType};
-        let mut schema_fields = fields
-            .iter()
-            .map(|(n, t)| {
-                Arc::new(SchemaType::primitive_type_builder(n, *t).build().unwrap())
-            })
-            .collect::<Vec<_>>();
-        let schema = SchemaType::group_type_builder("schema")
-            .with_fields(&mut schema_fields)
-            .build()
-            .unwrap();
-
-        Arc::new(SchemaDescriptor::new(Arc::new(schema)))
     }
 }

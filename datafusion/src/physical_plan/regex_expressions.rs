@@ -251,6 +251,7 @@ pub fn regexp_matches<O: Offset>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    type StringArray = Utf8Array<i32>;
 
     #[test]
     fn match_single_group() -> Result<()> {
@@ -316,22 +317,19 @@ mod tests {
 
     #[test]
     fn test_case_sensitive_regexp_match() {
-        let values = StringArray::from(vec!["abc"; 5]);
+        let values = StringArray::from_slice(vec!["abc"; 5]);
         let patterns =
-            StringArray::from(vec!["^(a)", "^(A)", "(b|d)", "(B|D)", "^(b|c)"]);
-
-        let rows = vec![
+            StringArray::from_slice(vec!["^(a)", "^(A)", "(b|d)", "(B|D)", "^(b|c)"]);
+        let expected = vec![
             Some(vec![Some("a")]),
             None,
             Some(vec![Some("b")]),
             None,
             None,
         ];
-        let mut list_array =
-            MutableListArray::<i32, MutableUtf8Array<i32>>::with_capacity(rows.len());
-        list_array.try_extend(rows)?;
-
-        let expected = list_array.into_arc();
+        let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
+        array.try_extend(expected)?;
+        let expected: ListArray<i32> = array.into();
         let re = regexp_match::<i32>(&[Arc::new(values), Arc::new(patterns)]).unwrap();
 
         assert_eq!(re.as_ref(), &expected);
@@ -339,23 +337,22 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_regexp_match() {
-        let values = StringArray::from(vec!["abc"; 5]);
+        let values = StringArray::from_slice(vec!["abc"; 5]);
         let patterns =
-            StringArray::from(vec!["^(a)", "^(A)", "(b|d)", "(B|D)", "^(b|c)"]);
-        let flags = StringArray::from(vec!["i"; 5]);
+            StringArray::from_slice(vec!["^(a)", "^(A)", "(b|d)", "(B|D)", "^(b|c)"]);
+        let flags = StringArray::from_slice(vec!["i"; 5]);
 
-        let rows = vec![
+        let expected = vec![
             Some(vec![Some("a")]),
             Some(vec![Some("a")]),
             Some(vec![Some("b")]),
             Some(vec![Some("b")]),
             None,
         ];
-        let mut list_array =
-            MutableListArray::<i32, MutableUtf8Array<i32>>::with_capacity(rows.len());
-        list_array.try_extend(rows)?;
 
-        let expected = list_array.into_arc();
+        let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
+        array.try_extend(expected)?;
+        let expected: ListArray<i32> = array.into();
         let re =
             regexp_match::<i32>(&[Arc::new(values), Arc::new(patterns), Arc::new(flags)])
                 .unwrap();
