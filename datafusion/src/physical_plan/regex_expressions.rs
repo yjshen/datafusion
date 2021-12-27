@@ -285,7 +285,7 @@ mod tests {
         ];
 
         let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        array.try_extend(expected);
+        array.try_extend(expected)?;
         let expected: ListArray<i32> = array.into();
 
         assert_eq!(expected, result);
@@ -308,7 +308,7 @@ mod tests {
 
         let expected = vec![None, Some(vec![Some("7")]), None, None];
         let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        array.try_extend(expected);
+        array.try_extend(expected)?;
         let expected: ListArray<i32> = array.into();
 
         assert_eq!(expected, result);
@@ -328,11 +328,11 @@ mod tests {
             None,
         ];
         let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        array.try_extend(expected);
+        array.try_extend(expected).unwrap();
         let expected = array.into_arc();
         let re = regexp_match::<i32>(&[Arc::new(values), Arc::new(patterns)]).unwrap();
 
-        assert_eq!(re, expected);
+        assert_eq!(re.as_ref(), expected.as_ref());
     }
 
     #[test]
@@ -351,12 +351,12 @@ mod tests {
         ];
 
         let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        array.try_extend(expected);
+        array.try_extend(expected).unwrap();
         let expected = array.into_arc();
         let re =
             regexp_match::<i32>(&[Arc::new(values), Arc::new(patterns), Arc::new(flags)])
                 .unwrap();
 
-        assert_eq!(re, expected);
+        assert_eq!(re.as_ref(), expected.as_ref());
     }
 }

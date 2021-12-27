@@ -3117,7 +3117,7 @@ mod tests {
 
         // execute a simple query and write the results to CSV
         let out_dir = tmp_dir.as_ref().to_str().unwrap().to_string() + "/out";
-        write_parquet(&mut ctx, "SELECT c1, c2 FROM test", &out_dir).await?;
+        write_parquet(&mut ctx, "SELECT c1, c2 FROM test", &out_dir, None).await?;
 
         // create a new context and verify that the results were saved to a partitioned csv file
         let mut ctx = ExecutionContext::new();
@@ -4088,10 +4088,7 @@ mod tests {
             Field::new("name", DataType::Utf8, true),
         ];
         let schemas = vec![
-            Arc::new(Schema::new_with_metadata(
-                fields.clone(),
-                non_empty_metadata.clone(),
-            )),
+            Arc::new(Schema::new_from(fields.clone(), non_empty_metadata.clone())),
             Arc::new(Schema::new(fields.clone())),
         ];
 
@@ -4121,7 +4118,8 @@ mod tests {
                     schema_ref,
                     options,
                     vec![Encoding::Plain],
-                );
+                )
+                .unwrap();
 
                 let _ = write_file(
                     &mut file,
@@ -4130,7 +4128,8 @@ mod tests {
                     parquet_schema,
                     options,
                     None,
-                )?;
+                )
+                .unwrap();
             }
         }
 

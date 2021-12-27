@@ -21,6 +21,9 @@ use std::{convert::TryFrom, fmt, iter::repeat, sync::Arc};
 
 use crate::error::{DataFusionError, Result};
 use crate::field_util::StructArrayExt;
+use arrow::bitmap::Bitmap;
+use arrow::buffer::Buffer;
+use arrow::compute::concatenate;
 use arrow::datatypes::DataType::Decimal;
 use arrow::{
     array::*,
@@ -33,9 +36,6 @@ use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
 use std::convert::{Infallible, TryInto};
 use std::str::FromStr;
-use arrow::bitmap::Bitmap;
-use arrow::buffer::Buffer;
-use arrow::compute::concatenate;
 
 type StringArray = Utf8Array<i32>;
 type LargeStringArray = Utf8Array<i64>;

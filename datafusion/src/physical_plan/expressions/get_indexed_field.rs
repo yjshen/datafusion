@@ -130,7 +130,7 @@ mod tests {
     fn build_utf8_lists(list_of_lists: Vec<Vec<Option<&str>>>) -> ListArray<i32> {
         let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
         for values in list_of_lists {
-            array.try_push(Some(values));
+            array.try_push(Some(values)).unwrap();
         }
         array.into()
     }
@@ -188,7 +188,7 @@ mod tests {
         let schema = list_schema("l");
         let expr = col("l", &schema).unwrap();
         let batch = RecordBatch::try_new(
-            Arc::new(schema),
+            Arc::new(schema.clone()),
             vec![Arc::new(ListArray::<i32>::new_empty(
                 schema.field(0).data_type.clone(),
             ))],
@@ -207,7 +207,7 @@ mod tests {
         expected: &str,
     ) -> Result<()> {
         let mut array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        array.try_extend(vec![Some(vec![Some("a")]), None, None]);
+        array.try_extend(vec![Some(vec![Some("a")]), None, None])?;
         let batch = RecordBatch::try_new(Arc::new(schema), vec![array.into_arc()])?;
         let expr = Arc::new(GetIndexedFieldExpr::new(expr, key));
         let r = expr.evaluate(&batch).map(|_| ());
@@ -235,7 +235,7 @@ mod tests {
         list_of_tuples: Vec<(Option<i64>, Vec<Option<&str>>)>,
     ) -> StructArray {
         let mut foo_values = Vec::new();
-        let bar_array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
+        let mut bar_array = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
 
         for (int_value, list_value) in list_of_tuples {
             foo_values.push(int_value);
