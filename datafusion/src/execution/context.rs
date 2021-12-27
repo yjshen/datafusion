@@ -2411,7 +2411,7 @@ mod tests {
 
             // generate some data
             for i in 0..10 {
-                let data = format!("{},2020-12-{}T00:00:00.000Z\n", i, i + 10);
+                let data = format!("{},2020-12-{}T00:00:00.000\n", i, i + 10);
                 file.write_all(data.as_bytes())?;
             }
         }
@@ -3995,8 +3995,8 @@ mod tests {
     async fn create_external_table_with_timestamps() {
         let mut ctx = ExecutionContext::new();
 
-        let data = "Jorge,2018-12-13T12:12:10.011Z\n\
-                    Andrew,2018-11-13T17:11:10.011Z";
+        let data = "Jorge,2018-12-13T12:12:10.011\n\
+                    Andrew,2018-11-13T17:11:10.011";
 
         let tmp_dir = TempDir::new().unwrap();
         let file_path = tmp_dir.path().join("timestamps.csv");
@@ -4117,7 +4117,7 @@ mod tests {
                     iter.into_iter(),
                     schema_ref,
                     options,
-                    vec![Encoding::Plain],
+                    vec![Encoding::Plain, Encoding::Plain],
                 )
                 .unwrap();
 
