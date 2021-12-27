@@ -476,7 +476,8 @@ mod tests {
     use arrow::datatypes::{DataType, Field};
     use arrow::io::parquet::write::to_parquet_schema;
     use futures::StreamExt;
-    use parquet::metadata::{ColumnChunkMetaData, SchemaDescriptor};
+    use arrow::io::parquet::write::{ColumnDescriptor, SchemaDescriptor};
+    use parquet::metadata::ColumnChunkMetaData;
     use parquet::statistics::Statistics as ParquetStatistics;
 
     #[tokio::test]
@@ -612,7 +613,7 @@ mod tests {
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 Some(1),
                 Some(10),
                 None,
@@ -622,7 +623,7 @@ mod tests {
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 Some(11),
                 Some(20),
                 None,
@@ -657,7 +658,7 @@ mod tests {
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 None,
                 None,
                 None,
@@ -667,7 +668,7 @@ mod tests {
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 Some(11),
                 Some(20),
                 None,
@@ -709,14 +710,14 @@ mod tests {
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(1),
                     Some(10),
                     None,
                     0,
                 ),
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(1),
                     Some(10),
                     None,
@@ -728,14 +729,14 @@ mod tests {
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(11),
                     Some(20),
                     None,
                     0,
                 ),
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(11),
                     Some(20),
                     None,
@@ -797,7 +798,7 @@ mod tests {
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(1),
                     Some(10),
                     None,
@@ -815,7 +816,7 @@ mod tests {
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(11),
                     Some(20),
                     None,

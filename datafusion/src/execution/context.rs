@@ -56,6 +56,7 @@ use arrow::error::{ArrowError, Result as ArrowResult};
 use arrow::io::csv;
 use arrow::io::parquet;
 use arrow::io::parquet::write::FallibleStreamingIterator;
+use arrow::io::parquet::write::WriteOptions;
 use arrow::record_batch::RecordBatch;
 
 use crate::catalog::{
@@ -753,7 +754,7 @@ impl ExecutionContext {
         &self,
         plan: Arc<dyn ExecutionPlan>,
         path: impl AsRef<str>,
-        options: parquet::write::WriteOptions,
+        options: WriteOptions,
     ) -> Result<()> {
         let path = path.as_ref();
         // create directory to contain the Parquet files (one per partition)
@@ -4218,13 +4219,13 @@ mod tests {
         ctx: &mut ExecutionContext,
         sql: &str,
         out_dir: &str,
-        options: Option<parquet::write::WriterProperties>,
+        options: Option<WriteOptions>,
     ) -> Result<()> {
         let logical_plan = ctx.create_logical_plan(sql)?;
         let logical_plan = ctx.optimize(&logical_plan)?;
         let physical_plan = ctx.create_physical_plan(&logical_plan).await?;
 
-        let options = options.unwrap_or_else(|| parquet::write::WriteOptions {
+        let options = options.unwrap_or_else(|| WriteOptions {
             compression: parquet::write::Compression::Uncompressed,
             write_statistics: false,
             version: parquet::write::Version::V1,
