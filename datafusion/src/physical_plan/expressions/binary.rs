@@ -1150,10 +1150,7 @@ mod tests {
         let arithmetic_op = binary_simple(scalar, op, col("a", schema)?);
         let batch = RecordBatch::try_new(Arc::clone(schema), vec![Arc::clone(arr)])?;
         let result = arithmetic_op.evaluate(&batch)?.into_array(batch.num_rows());
-        assert_eq!(
-            result.as_ref(),
-            (Arc::new(expected.clone()) as ArrayRef).as_ref()
-        );
+        assert_eq!(result.as_ref(), expected as &dyn Array);
 
         Ok(())
     }
@@ -1171,10 +1168,7 @@ mod tests {
         let arithmetic_op = binary_simple(col("a", schema)?, op, scalar);
         let batch = RecordBatch::try_new(Arc::clone(schema), vec![Arc::clone(arr)])?;
         let result = arithmetic_op.evaluate(&batch)?.into_array(batch.num_rows());
-        assert_eq!(
-            result.as_ref(),
-            (Arc::new(expected.clone()) as ArrayRef).as_ref()
-        );
+        assert_eq!(result.as_ref(), expected as &dyn Array);
 
         Ok(())
     }
@@ -1601,6 +1595,6 @@ mod tests {
             .into_iter()
             .map(|i| i.map(|i| i * tree_depth))
             .collect();
-        assert_eq!(result.as_ref(), (Arc::new(expected) as ArrayRef).as_ref());
+        assert_eq!(result.as_ref(), &expected as &dyn Array);
     }
 }

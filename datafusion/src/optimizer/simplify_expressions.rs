@@ -1757,8 +1757,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let expected =
-            "Cannot cast string '' to value of arrow::datatypes::types::Int32Type type";
+        let expected = "Could not cast Utf8[] to value of type Int32";
         let actual = get_optimized_plan_err(&plan, &Utc::now());
         assert_contains!(actual, expected);
     }

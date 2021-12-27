@@ -218,7 +218,7 @@ mod tests {
                 "c7: Int64",
                 "c8: Int64",
                 "c9: Int64",
-                "c10: Int64",
+                "c10: Float64",
                 "c11: Float64",
                 "c12: Float64",
                 "c13: Utf8"

@@ -87,7 +87,7 @@ impl PhysicalExpr for GetIndexedFieldExpr {
                 }
                 (DataType::List(_), ScalarValue::Int64(Some(i))) => {
                     let as_list_array =
-                        array.as_any().downcast_ref::<ListArray<i64>>().unwrap();
+                        array.as_any().downcast_ref::<ListArray<i32>>().unwrap();
                     if as_list_array.is_empty() {
                         let scalar_null: ScalarValue = array.data_type().try_into()?;
                         return Ok(ColumnarValue::Scalar(scalar_null))

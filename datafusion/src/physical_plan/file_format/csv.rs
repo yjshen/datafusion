@@ -91,7 +91,6 @@ fn deserialize(
 struct CsvBatchReader<R: Read> {
     reader: csv::read::Reader<R>,
     current_read: usize,
-    rows_read: usize,
     batch_size: usize,
     rows: Vec<csv::read::ByteRecord>,
     limit: Option<usize>,
@@ -113,7 +112,6 @@ impl<R: Read> CsvBatchReader<R> {
             schema,
             current_read: 0,
             rows,
-            rows_read: 0,
             batch_size,
             limit,
             projection,
@@ -125,28 +123,35 @@ impl<R: Read> Iterator for CsvBatchReader<R> {
     type Item = ArrowResult<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.rows_read < self.batch_size {
-            return None;
-        }
-
         let batch_size = match self.limit {
-            Some(limit) => self.batch_size.min(limit - self.current_read),
+            Some(limit) => {
+                if self.current_read >= limit {
+                    return None;
+                }
+                self.batch_size.min(limit - self.current_read)
+            }
             None => self.batch_size,
         };
         let rows_read =
             csv::read::read_rows(&mut self.reader, 0, &mut self.rows[..batch_size]);
 
-        Some(rows_read.and_then(|rows_read| {
-            self.current_read += rows_read;
+        match rows_read {
+            Ok(rows_read) => {
+                if rows_read > 0 {
+                    self.current_read += rows_read;
 
-            let batch = deserialize(
-                &self.rows[..rows_read],
-                self.projection.as_ref(),
-                &self.schema,
-            )?;
-            self.rows_read = rows_read;
-            Ok(batch)
-        }))
+                    let batch = deserialize(
+                        &self.rows[..rows_read],
+                        self.projection.as_ref(),
+                        &self.schema,
+                    );
+                    Some(batch)
+                } else {
+                    None
+                }
+            }
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 
