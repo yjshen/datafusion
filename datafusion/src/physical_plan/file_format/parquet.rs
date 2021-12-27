@@ -475,8 +475,9 @@ mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field};
     use arrow::io::parquet::write::to_parquet_schema;
+    use arrow::io::parquet::write::{ColumnDescriptor, SchemaDescriptor};
     use futures::StreamExt;
-    use parquet::metadata::{ColumnChunkMetaData, SchemaDescriptor};
+    use parquet::metadata::ColumnChunkMetaData;
     use parquet::statistics::Statistics as ParquetStatistics;
 
     #[tokio::test]
@@ -606,13 +607,14 @@ mod tests {
         // int > 1 => c1_max > 1
         let expr = col("c1").gt(lit(15));
         let schema = Schema::new(vec![Field::new("c1", DataType::Int32, false)]);
-        let predicate_builder = PruningPredicate::try_new(&expr, Arc::new(schema))?;
+        let predicate_builder =
+            PruningPredicate::try_new(&expr, Arc::new(schema.clone()))?;
 
         let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 Some(1),
                 Some(10),
                 None,
@@ -622,7 +624,7 @@ mod tests {
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 Some(11),
                 Some(20),
                 None,
@@ -651,13 +653,14 @@ mod tests {
         // int > 1 => c1_max > 1
         let expr = col("c1").gt(lit(15));
         let schema = Schema::new(vec![Field::new("c1", DataType::Int32, false)]);
-        let predicate_builder = PruningPredicate::try_new(&expr, Arc::new(schema))?;
+        let predicate_builder =
+            PruningPredicate::try_new(&expr, Arc::new(schema.clone()))?;
 
         let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 None,
                 None,
                 None,
@@ -667,7 +670,7 @@ mod tests {
         let rgm2 = get_row_group_meta_data(
             &schema_descr,
             vec![&parquet_primitive_column_stats::<i32>(
-                schema_descr.column(0),
+                schema_descr.column(0).clone(),
                 Some(11),
                 Some(20),
                 None,
@@ -709,14 +712,14 @@ mod tests {
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(1),
                     Some(10),
                     None,
                     0,
                 ),
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(1),
                     Some(10),
                     None,
@@ -728,14 +731,14 @@ mod tests {
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(11),
                     Some(20),
                     None,
                     0,
                 ),
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(11),
                     Some(20),
                     None,
@@ -790,14 +793,14 @@ mod tests {
             Field::new("c1", DataType::Int32, false),
             Field::new("c2", DataType::Boolean, false),
         ]));
-        let predicate_builder = PruningPredicate::try_new(&expr, schema)?;
+        let predicate_builder = PruningPredicate::try_new(&expr, schema.clone())?;
 
         let schema_descr = to_parquet_schema(&schema)?;
         let rgm1 = get_row_group_meta_data(
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(1),
                     Some(10),
                     None,
@@ -815,7 +818,7 @@ mod tests {
             &schema_descr,
             vec![
                 &parquet_primitive_column_stats::<i32>(
-                    schema_descr.column(0),
+                    schema_descr.column(0).clone(),
                     Some(11),
                     Some(20),
                     None,
@@ -857,6 +860,7 @@ mod tests {
 
         let mut columns = vec![];
         for (i, s) in column_statistics.into_iter().enumerate() {
+            let column_descr = schema_descr.column(i);
             let type_ = match column_descr.type_() {
                 ParquetType::PrimitiveType { physical_type, .. } => {
                     physical_type_to_type(&physical_type).0
@@ -865,7 +869,6 @@ mod tests {
                     panic!("Trying to write a row group of a non-physical type")
                 }
             };
-            let column_descr = schema_descr.column(i);
             let column_chunk = ColumnChunk {
                 file_path: None,
                 file_offset: 0,
@@ -892,16 +895,9 @@ mod tests {
                 crypto_metadata: None,
                 encrypted_column_metadata: None,
             };
-            let column = ColumnChunkMetaData {
-                column_descr: column_descr.clone(),
-                column_chunk,
-            };
+            let column = ColumnChunkMetaData::new(column_chunk, column_descr.clone());
             columns.push(column);
         }
-        RowGroupMetaData {
-            columns,
-            num_rows: 1000,
-            total_byte_size: 2000,
-        }
+        RowGroupMetaData::new(columns, 1000, 2000)
     }
 }

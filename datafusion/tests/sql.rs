@@ -4815,39 +4815,6 @@ macro_rules! test_expression {
     };
 }
 
-macro_rules! test_expression_in_hex {
-    ($SQL:expr, $EXPECTED:expr) => {
-        let mut ctx = ExecutionContext::new();
-        let sql = format!("SELECT {}", $SQL);
-        let batches = &execute_to_batches(&mut ctx, sql.as_str()).await;
-        let actual = batches[0]
-            .columns()
-            .iter()
-            .map(|x| match x.data_type() {
-                DataType::Binary => {
-                    let a = x.as_any().downcast_ref::<BinaryArray<i32>>().unwrap();
-                    let value = a.value(0);
-                    value.iter().fold("".to_string(), |mut acc, x| {
-                        acc.push_str(&format!("{:02x}", x));
-                        acc
-                    })
-                }
-                DataType::LargeBinary => {
-                    let a = x.as_any().downcast_ref::<BinaryArray<i64>>().unwrap();
-                    let value = a.value(0);
-                    value.iter().fold("".to_string(), |mut acc, x| {
-                        acc.push_str(&format!("{:02x}", x));
-                        acc
-                    })
-                }
-                _ => todo!("Expect binary value type"),
-            })
-            .nth(0)
-            .unwrap();
-        assert_eq!(actual.as_str(), $EXPECTED);
-    };
-}
-
 #[tokio::test]
 async fn test_boolean_expressions() -> Result<()> {
     test_expression!("true", "true");

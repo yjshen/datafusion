@@ -189,9 +189,9 @@ pub fn table_with_timestamps() -> Arc<dyn TableProvider> {
 /// Return a new table which provide this decimal column
 pub fn table_with_decimal() -> Arc<dyn TableProvider> {
     let batch_decimal = make_decimal();
-    let schema = batch_decimal.schema();
+    let schema = batch_decimal.schema().clone();
     let partitions = vec![vec![batch_decimal]];
-    Arc::new(MemTable::try_new(schema.clone(), partitions).unwrap())
+    Arc::new(MemTable::try_new(schema, partitions).unwrap())
 }
 
 fn make_decimal() -> RecordBatch {

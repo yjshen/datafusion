@@ -56,6 +56,7 @@ use arrow::error::{ArrowError, Result as ArrowResult};
 use arrow::io::csv;
 use arrow::io::parquet;
 use arrow::io::parquet::write::FallibleStreamingIterator;
+use arrow::io::parquet::write::WriteOptions;
 use arrow::record_batch::RecordBatch;
 
 use crate::catalog::{
@@ -753,7 +754,7 @@ impl ExecutionContext {
         &self,
         plan: Arc<dyn ExecutionPlan>,
         path: impl AsRef<str>,
-        options: parquet::write::WriteOptions,
+        options: WriteOptions,
     ) -> Result<()> {
         let path = path.as_ref();
         // create directory to contain the Parquet files (one per partition)
@@ -3116,7 +3117,7 @@ mod tests {
 
         // execute a simple query and write the results to CSV
         let out_dir = tmp_dir.as_ref().to_str().unwrap().to_string() + "/out";
-        write_parquet(&mut ctx, "SELECT c1, c2 FROM test", &out_dir).await?;
+        write_parquet(&mut ctx, "SELECT c1, c2 FROM test", &out_dir, None).await?;
 
         // create a new context and verify that the results were saved to a partitioned csv file
         let mut ctx = ExecutionContext::new();
@@ -4087,10 +4088,7 @@ mod tests {
             Field::new("name", DataType::Utf8, true),
         ];
         let schemas = vec![
-            Arc::new(Schema::new_with_metadata(
-                fields.clone(),
-                non_empty_metadata.clone(),
-            )),
+            Arc::new(Schema::new_from(fields.clone(), non_empty_metadata.clone())),
             Arc::new(Schema::new(fields.clone())),
         ];
 
@@ -4120,7 +4118,8 @@ mod tests {
                     schema_ref,
                     options,
                     vec![Encoding::Plain],
-                );
+                )
+                .unwrap();
 
                 let _ = write_file(
                     &mut file,
@@ -4129,7 +4128,8 @@ mod tests {
                     parquet_schema,
                     options,
                     None,
-                )?;
+                )
+                .unwrap();
             }
         }
 
@@ -4218,13 +4218,13 @@ mod tests {
         ctx: &mut ExecutionContext,
         sql: &str,
         out_dir: &str,
-        options: Option<parquet::write::WriterProperties>,
+        options: Option<WriteOptions>,
     ) -> Result<()> {
         let logical_plan = ctx.create_logical_plan(sql)?;
         let logical_plan = ctx.optimize(&logical_plan)?;
         let physical_plan = ctx.create_physical_plan(&logical_plan).await?;
 
-        let options = options.unwrap_or_else(|| parquet::write::WriteOptions {
+        let options = options.unwrap_or_else(|| WriteOptions {
             compression: parquet::write::Compression::Uncompressed,
             write_statistics: false,
             version: parquet::write::Version::V1,
