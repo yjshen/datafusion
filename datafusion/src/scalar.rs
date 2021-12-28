@@ -2450,7 +2450,7 @@ mod tests {
             ]),
         );
         let dt = scalar.get_datatype();
-        let sub_dt = field_e.data_type;
+        let sub_dt = field_d.data_type;
 
         // Check Display
         assert_eq!(

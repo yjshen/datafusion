@@ -1896,6 +1896,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn aggregate_decimal_min() -> Result<()> {
         let mut ctx = ExecutionContext::new();
         ctx.register_table("d_table", test::table_with_decimal())
@@ -1916,6 +1917,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn aggregate_decimal_max() -> Result<()> {
         let mut ctx = ExecutionContext::new();
         ctx.register_table("d_table", test::table_with_decimal())

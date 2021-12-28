@@ -613,6 +613,42 @@ fn is_not_distinct_from_primitive<T: NativeType>(
         .collect()
 }
 
+fn is_distinct_from_utf8<O: Offset>(
+    left: &dyn Array,
+    right: &dyn Array,
+) -> BooleanArray {
+    let left = left
+        .as_any()
+        .downcast_ref::<Utf8Array<O>>()
+        .expect("distinct_from op failed to downcast to utf8 array");
+    let right = right
+        .as_any()
+        .downcast_ref::<Utf8Array<O>>()
+        .expect("distinct_from op failed to downcast to utf8 array");
+    left.iter()
+        .zip(right.iter())
+        .map(|(x, y)| Some(x != y))
+        .collect()
+}
+
+fn is_not_distinct_from_utf8<O: Offset>(
+    left: &dyn Array,
+    right: &dyn Array,
+) -> BooleanArray {
+    let left = left
+        .as_any()
+        .downcast_ref::<Utf8Array<O>>()
+        .expect("not_distinct_from op failed to downcast to utf8 array");
+    let right = right
+        .as_any()
+        .downcast_ref::<Utf8Array<O>>()
+        .expect("not_distinct_from op failed to downcast to utf8 array");
+    left.iter()
+        .zip(right.iter())
+        .map(|(x, y)| Some(x == y))
+        .collect()
+}
+
 fn is_distinct_from(left: &dyn Array, right: &dyn Array) -> Result<Arc<dyn Array>> {
     match (left.data_type(), right.data_type()) {
         (DataType::Int8, DataType::Int8) => {
@@ -644,6 +680,12 @@ fn is_distinct_from(left: &dyn Array, right: &dyn Array) -> Result<Arc<dyn Array
         }
         (DataType::Boolean, DataType::Boolean) => {
             Ok(Arc::new(is_distinct_from_bool(left, right)))
+        }
+        (DataType::Utf8, DataType::Utf8) => {
+            Ok(Arc::new(is_distinct_from_utf8::<i32>(left, right)))
+        }
+        (DataType::LargeUtf8, DataType::LargeUtf8) => {
+            Ok(Arc::new(is_distinct_from_utf8::<i64>(left, right)))
         }
         (lhs, rhs) => Err(DataFusionError::Internal(format!(
             "Cannot evaluate is_distinct_from expression with types {:?} and {:?}",
@@ -683,6 +725,12 @@ fn is_not_distinct_from(left: &dyn Array, right: &dyn Array) -> Result<Arc<dyn A
         }
         (DataType::Boolean, DataType::Boolean) => {
             Ok(Arc::new(is_not_distinct_from_bool(left, right)))
+        }
+        (DataType::Utf8, DataType::Utf8) => {
+            Ok(Arc::new(is_not_distinct_from_utf8::<i32>(left, right)))
+        }
+        (DataType::LargeUtf8, DataType::LargeUtf8) => {
+            Ok(Arc::new(is_not_distinct_from_utf8::<i64>(left, right)))
         }
         (lhs, rhs) => Err(DataFusionError::Internal(format!(
             "Cannot evaluate is_not_distinct_from expression with types {:?} and {:?}",
