@@ -505,7 +505,7 @@ impl ConstEvaluator {
         let phys_expr = self.planner.create_physical_expr(
             &expr,
             &self.input_schema,
-            &self.input_batch.schema(),
+            self.input_batch.schema(),
             &self.ctx_state,
         )?;
         let col_val = phys_expr.evaluate(&self.input_batch)?;

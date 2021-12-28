@@ -28,6 +28,7 @@ use sqlparser::ast;
 use std::cmp::Ordering;
 use std::convert::{From, TryFrom};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// The frame-spec determines which output rows are read by an aggregate window function.
 ///
@@ -126,7 +127,7 @@ impl Default for WindowFrame {
 /// 5. UNBOUNDED FOLLOWING
 ///
 /// in this implementation we'll only allow <expr> to be u64 (i.e. no dynamic boundary)
-#[derive(Debug, Clone, Copy, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Eq)]
 pub enum WindowFrameBound {
     /// 1. UNBOUNDED PRECEDING
     /// The frame boundary is the first row in the partition.
@@ -169,6 +170,12 @@ impl fmt::Display for WindowFrameBound {
             WindowFrameBound::Preceding(Some(n)) => write!(f, "{} PRECEDING", n),
             WindowFrameBound::Following(Some(n)) => write!(f, "{} FOLLOWING", n),
         }
+    }
+}
+
+impl Hash for WindowFrameBound {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.get_rank().hash(state)
     }
 }
 

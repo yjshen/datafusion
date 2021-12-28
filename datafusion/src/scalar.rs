@@ -870,9 +870,7 @@ impl ScalarValue {
                 // Call iter_to_array recursively to convert the scalars for each column into Arrow arrays
                 let field_values = columns
                     .iter()
-                    .map(|c| {
-                        Self::iter_to_array(c.clone()).and_then(|x| Ok(Arc::from(x)))
-                    })
+                    .map(|c| Self::iter_to_array(c.clone()).map(Arc::from))
                     .collect::<Result<Vec<_>>>()?;
 
                 Box::new(StructArray::from_data(data_type, field_values, None))
@@ -913,8 +911,7 @@ impl ScalarValue {
         scalars: impl IntoIterator<Item = ScalarValue>,
         data_type: &DataType,
     ) -> Result<ListArray<i32>> {
-        let mut offsets: Vec<i32> = vec![];
-        offsets.push(0);
+        let mut offsets: Vec<i32> = vec![0];
 
         let mut elements: Vec<ArrayRef> = Vec::new();
         let mut valid: Vec<bool> = vec![];

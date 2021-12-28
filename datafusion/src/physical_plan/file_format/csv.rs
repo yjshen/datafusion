@@ -207,7 +207,7 @@ impl ExecutionPlan for CsvExec {
                 reader,
                 file_schema.clone(),
                 batch_size,
-                remaining.clone(),
+                *remaining,
                 file_projection.clone(),
             )) as BatchIter
         };

@@ -613,10 +613,7 @@ fn is_not_distinct_from_primitive<T: NativeType>(
         .collect()
 }
 
-fn is_distinct_from_utf8<O: Offset>(
-    left: &dyn Array,
-    right: &dyn Array,
-) -> BooleanArray {
+fn is_distinct_from_utf8<O: Offset>(left: &dyn Array, right: &dyn Array) -> BooleanArray {
     let left = left
         .as_any()
         .downcast_ref::<Utf8Array<O>>()

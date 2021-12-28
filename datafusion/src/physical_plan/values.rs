@@ -81,7 +81,7 @@ impl ValuesExec {
                     })
                     .collect::<Result<Vec<_>>>()
                     .and_then(ScalarValue::iter_to_array)
-                    .and_then(|b| Ok(Arc::from(b)))
+                    .map(Arc::from)
             })
             .collect::<Result<Vec<_>>>()?;
         let batch = RecordBatch::try_new(schema.clone(), arr)?;
