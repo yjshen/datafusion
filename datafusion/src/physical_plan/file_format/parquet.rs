@@ -780,6 +780,7 @@ mod tests {
     }
 
     #[ignore]
+    #[allow(dead_code)]
     fn row_group_predicate_builder_null_expr() -> Result<()> {
         use crate::logical_plan::{col, lit};
         // test row group predicate with an unknown (Null) expr
@@ -862,7 +863,7 @@ mod tests {
             let column_descr = schema_descr.column(i);
             let type_ = match column_descr.type_() {
                 ParquetType::PrimitiveType { physical_type, .. } => {
-                    physical_type_to_type(&physical_type).0
+                    physical_type_to_type(physical_type).0
                 }
                 _ => {
                     panic!("Trying to write a row group of a non-physical type")

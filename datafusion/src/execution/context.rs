@@ -4226,7 +4226,7 @@ mod tests {
         let logical_plan = ctx.optimize(&logical_plan)?;
         let physical_plan = ctx.create_physical_plan(&logical_plan).await?;
 
-        let options = options.unwrap_or_else(|| WriteOptions {
+        let options = options.unwrap_or(WriteOptions {
             compression: parquet::write::Compression::Uncompressed,
             write_statistics: false,
             version: parquet::write::Version::V1,

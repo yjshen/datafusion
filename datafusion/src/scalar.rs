@@ -2423,11 +2423,7 @@ mod tests {
 
         let field_e = Field::new("e", DataType::Int16, false);
         let field_f = Field::new("f", DataType::Int64, false);
-        let field_d = Field::new(
-            "D",
-            DataType::Struct(vec![field_e.clone(), field_f.clone()]),
-            false,
-        );
+        let field_d = Field::new("D", DataType::Struct(vec![field_e, field_f]), false);
 
         let scalar = ScalarValue::Struct(
             Some(Box::new(vec![
@@ -2439,12 +2435,7 @@ mod tests {
                     ("f", ScalarValue::from(3i64)),
                 ]),
             ])),
-            Box::new(vec![
-                field_a.clone(),
-                field_b.clone(),
-                field_c.clone(),
-                field_d.clone(),
-            ]),
+            Box::new(vec![field_a, field_b, field_c, field_d.clone()]),
         );
         let dt = scalar.get_datatype();
         let sub_dt = field_d.data_type;
