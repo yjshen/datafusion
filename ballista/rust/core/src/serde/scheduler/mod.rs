@@ -101,9 +101,9 @@ impl From<protobuf::ExecutorMetadata> for ExecutorMeta {
 /// Summary of executed partition
 #[derive(Debug, Copy, Clone, Default)]
 pub struct PartitionStats {
-    pub(crate) num_rows: Option<u64>,
-    pub(crate) num_batches: Option<u64>,
-    pub(crate) num_bytes: Option<u64>,
+    pub num_rows: Option<u64>,
+    pub num_batches: Option<u64>,
+    pub num_bytes: Option<u64>,
 }
 
 impl fmt::Display for PartitionStats {
