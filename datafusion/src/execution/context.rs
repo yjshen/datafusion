@@ -31,8 +31,6 @@ use crate::{
         },
         MemTable,
     },
-    execution::disk_manager::DiskManager,
-    execution::memory_management::MemoryManager,
     logical_plan::{PlanType, ToStringifiedPlan},
     optimizer::eliminate_limit::EliminateLimit,
     physical_optimizer::{

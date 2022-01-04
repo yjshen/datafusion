@@ -624,11 +624,7 @@ pub mod distinct_expressions;
 pub mod empty;
 pub mod explain;
 pub mod expressions;
-<<<<<<< HEAD
 pub mod file_format;
-pub mod external_sort;
-=======
->>>>>>> move sorts together into submodule
 pub mod filter;
 pub mod functions;
 pub mod hash_aggregate;

@@ -63,7 +63,7 @@ pub enum DataFusionError {
     Execution(String),
     /// This error is thrown when a consumer cannot acquire memory from the Memory Manager
     /// we can just cancel the execution of the partition.
-    OutOfMemory(String),
+    ResourcesExhausted(String),
 }
 
 impl DataFusionError {
@@ -132,8 +132,8 @@ impl Display for DataFusionError {
             DataFusionError::Execution(ref desc) => {
                 write!(f, "Execution error: {}", desc)
             }
-            DataFusionError::OutOfMemory(ref desc) => {
-                write!(f, "Out of memory error: {}", desc)
+            DataFusionError::ResourcesExhausted(ref desc) => {
+                write!(f, "Resources exhausted: {}", desc)
             }
         }
     }

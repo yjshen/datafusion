@@ -21,6 +21,7 @@
 use crate::error::Result;
 use crate::execution::disk_manager::DiskManager;
 use crate::execution::memory_management::{MemoryConsumer, MemoryManager};
+use lazy_static::lazy_static;
 use std::sync::Arc;
 
 lazy_static! {
@@ -100,7 +101,7 @@ impl RuntimeConfig {
 
     /// Customize exec size
     pub fn with_local_dirs(mut self, local_dirs: Vec<String>) -> Self {
-        assert!(local_dirs.len() > 0);
+        assert!(!local_dirs.is_empty());
         self.local_dirs = local_dirs;
         self
     }

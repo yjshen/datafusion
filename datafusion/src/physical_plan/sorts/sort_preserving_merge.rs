@@ -17,8 +17,6 @@
 
 //! Defines the sort preserving merge plan
 
-use super::common::AbortOnDropMany;
-use super::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -43,6 +41,7 @@ use crate::execution::memory_management::{
 };
 use crate::execution::runtime_env::RuntimeEnv;
 use crate::execution::runtime_env::RUNTIME_ENV;
+use crate::physical_plan::common::AbortOnDropMany;
 use crate::physical_plan::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet,
 };
@@ -55,7 +54,6 @@ use crate::physical_plan::{
     Distribution, ExecutionPlan, Partitioning, PhysicalExpr, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
-use crate::physical_plan::common::AbortOnDropMany;
 use futures::lock::Mutex;
 use std::fmt::{Debug, Formatter};
 
@@ -164,7 +162,7 @@ impl ExecutionPlan for SortPreservingMergeExec {
                 self.input.execute(0).await
             }
             _ => {
-                let (receivers, join_handles) = (0..input_partitions)
+                let (streams, join_handles) = (0..input_partitions)
                     .into_iter()
                     .map(|part_i| {
                         let (sender, receiver) = mpsc::channel(1);
@@ -172,7 +170,7 @@ impl ExecutionPlan for SortPreservingMergeExec {
                             spawn_execution(self.input.clone(), sender, part_i);
                         (receiver, join_handle)
                     })
-                    .collect();
+                    .unzip();
 
                 Ok(Box::pin(
                     SortPreservingMergeStream::new_from_receiver(
@@ -220,10 +218,6 @@ struct MergingStreams {
     pub(crate) streams: Mutex<Vec<StreamWrapper>>,
     /// The schema of the RecordBatches yielded by this stream
     schema: SchemaRef,
-
-    /// Drop helper for tasks feeding the [`receivers`](Self::receivers)
-    _drop_helper: AbortOnDropMany<()>,
-
     /// Runtime
     runtime: Arc<RuntimeEnv>,
 }
@@ -260,7 +254,7 @@ impl MergingStreams {
         let origin_stream = &mut streams[stream_idx];
         match origin_stream {
             StreamWrapper::Receiver(_) => {
-                return Err(DataFusionError::Execution(
+                Err(DataFusionError::Execution(
                     "Unexpected spilling a receiver stream in SortPreservingMerge"
                         .to_string(),
                 ))
@@ -367,6 +361,7 @@ pub(crate) struct SortPreservingMergeStream {
 }
 
 impl SortPreservingMergeStream {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_from_receiver(
         receivers: Vec<mpsc::Receiver<ArrowResult<RecordBatch>>>,
         _drop_helper: AbortOnDropMany<()>,
@@ -384,7 +379,7 @@ impl SortPreservingMergeStream {
 
         let receivers = receivers
             .into_iter()
-            .map(|s| StreamWrapper::Receiver(s))
+            .map(StreamWrapper::Receiver)
             .collect();
         let streams = Arc::new(MergingStreams::new(
             partition,
@@ -439,7 +434,7 @@ impl SortPreservingMergeStream {
             schema,
             cursors,
             streams,
-            _drop_helper,
+            _drop_helper: AbortOnDropMany(vec![]),
             column_expressions: expressions.iter().map(|x| x.expr.clone()).collect(),
             sort_options: Arc::new(expressions.iter().map(|x| x.options).collect()),
             target_batch_size,
@@ -732,14 +727,8 @@ mod tests {
     use crate::{assert_batches_eq, test_util};
 
     use super::*;
-<<<<<<< HEAD
     use arrow::datatypes::{DataType, Field, Schema};
     use futures::{FutureExt, SinkExt};
-    use crate::physical_plan::sorts::sort::SortExec;
-=======
-    use futures::SinkExt;
-    use tokio_stream::StreamExt;
->>>>>>> Doc
 
     #[tokio::test]
     async fn test_merge_interleave() {
@@ -1309,7 +1298,7 @@ mod tests {
         let baseline_metrics = BaselineMetrics::new(&metrics, 0);
 
         let merge_stream = SortPreservingMergeStream::new_from_receiver(
-            streams,
+            receivers,
             AbortOnDropMany(vec![]),
             batches.schema(),
             sort.as_slice(),

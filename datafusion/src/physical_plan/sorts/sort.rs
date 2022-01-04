@@ -17,12 +17,9 @@
 
 //! Defines the SORT plan
 
-use super::common::AbortOnDropSingle;
-use super::metrics::{
-    BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
-};
 use super::{RecordBatchStream, SendableRecordBatchStream};
 use crate::error::{DataFusionError, Result};
+use crate::physical_plan::common::AbortOnDropSingle;
 use crate::physical_plan::expressions::PhysicalSortExpr;
 use crate::physical_plan::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet, RecordOutput,
@@ -44,7 +41,6 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use crate::physical_plan::common::AbortOnDropSingle;
 
 /// Sort execution plan
 #[derive(Debug)]

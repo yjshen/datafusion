@@ -307,12 +307,16 @@ async fn read_spill_as_stream(
         TKReceiver<ArrowResult<RecordBatch>>,
     ) = tokio::sync::mpsc::channel(2);
     let path_clone = path.clone();
-    task::spawn_blocking(move || {
+    let join_handle = task::spawn_blocking(move || {
         if let Err(e) = read_spill(sender, path_clone) {
             error!("Failure while reading spill file: {}. Error: {}", path, e);
         }
     });
-    Ok(RecordBatchReceiverStream::create(&schema, receiver))
+    Ok(RecordBatchReceiverStream::create(
+        &schema,
+        receiver,
+        join_handle,
+    ))
 }
 
 pub(crate) async fn convert_stream_disk_based(
@@ -521,30 +525,41 @@ pub async fn external_sort(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datasource::object_store::local::LocalFileSystem;
     use crate::physical_plan::coalesce_partitions::CoalescePartitionsExec;
     use crate::physical_plan::expressions::col;
     use crate::physical_plan::memory::MemoryExec;
-    use crate::physical_plan::sorts::SortOptions;
     use crate::physical_plan::{
         collect,
-        csv::{CsvExec, CsvReadOptions},
+        file_format::{CsvExec, PhysicalPlanConfig},
     };
     use crate::test;
+    use crate::test_util;
     use arrow::array::*;
+    use arrow::compute::sort::SortOptions;
     use arrow::datatypes::*;
 
     #[tokio::test]
     async fn test_sort() -> Result<()> {
-        let schema = test::aggr_test_schema();
+        let schema = test_util::aggr_test_schema();
         let partitions = 4;
-        let path = test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
-        let csv = CsvExec::try_new(
-            &path,
-            CsvReadOptions::new().schema(&schema),
-            None,
-            1024,
-            None,
-        )?;
+        let (_, files) =
+            test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
+
+        let csv = CsvExec::new(
+            PhysicalPlanConfig {
+                object_store: Arc::new(LocalFileSystem {}),
+                file_schema: Arc::clone(&schema),
+                file_groups: files,
+                statistics: Statistics::default(),
+                projection: None,
+                batch_size: 1024,
+                limit: None,
+                table_partition_cols: vec![],
+            },
+            true,
+            b',',
+        );
 
         let sort_exec = Arc::new(ExternalSortExec::try_new(
             vec![

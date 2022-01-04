@@ -294,7 +294,7 @@ pub struct IPCWriterWrapper {
 impl IPCWriterWrapper {
     /// Create new writer
     pub fn new(path: &str, schema: &Schema) -> Result<Self> {
-        let file = File::create(path).map_err(|e| DataFusionError::IoError(e))?;
+        let file = File::create(path).map_err(DataFusionError::IoError)?;
         let buffer_writer = std::io::BufWriter::new(file);
         Ok(Self {
             num_batches: 0,

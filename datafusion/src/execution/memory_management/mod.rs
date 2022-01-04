@@ -19,7 +19,8 @@
 
 pub mod allocation_strategist;
 
-use crate::error::DataFusionError::OutOfMemory;
+use std::cmp::Reverse;
+use crate::error::DataFusionError::ResourcesExhausted;
 use crate::error::{DataFusionError, Result};
 use crate::execution::memory_management::allocation_strategist::{
     DummyAllocationStrategist, FairStrategist, MemoryAllocationStrategist,
@@ -169,7 +170,7 @@ impl PartitionMemoryManager {
     }
 
     /// Try to acquire `required` of execution memory for the consumer and return the number of bytes
-    /// obtained, or return OutOfMemoryError if no enough memory avaiable even after possible spills.
+    /// obtained, or return ResourcesExhausted if no enough memory available even after possible spills.
     pub async fn acquire_exec_memory(
         &self,
         required: usize,
@@ -192,7 +193,7 @@ impl PartitionMemoryManager {
             for c in consumers.iter() {
                 all_consumers.push(c.1.clone());
             }
-            all_consumers.sort_by(|a, b| b.get_used().cmp(&a.get_used()));
+            all_consumers.sort_by_key(|b| Reverse(b.get_used()));
 
             for c in all_consumers.iter_mut() {
                 if c.id() == consumer_id {
@@ -235,7 +236,7 @@ impl PartitionMemoryManager {
         }
 
         if got < required {
-            return Err(OutOfMemory(format!(
+            return Err(ResourcesExhausted(format!(
                 "Unable to acquire {} bytes of memory, got {}",
                 required, got
             )));

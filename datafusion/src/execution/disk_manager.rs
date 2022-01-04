@@ -34,7 +34,7 @@ pub struct DiskManager {
 
 impl DiskManager {
     /// Create local dirs inside user provided dirs through conf
-    pub fn new(conf_dirs: &Vec<String>) -> Result<Self> {
+    pub fn new(conf_dirs: &[String]) -> Result<Self> {
         Ok(Self {
             local_dirs: create_local_dirs(conf_dirs)?,
         })
@@ -55,9 +55,9 @@ impl DiskManager {
 }
 
 /// Setup local dirs by creating one new dir in each of the given dirs
-fn create_local_dirs(local_dir: &Vec<String>) -> Result<Vec<String>> {
+fn create_local_dirs(local_dir: &[String]) -> Result<Vec<String>> {
     local_dir
-        .into_iter()
+        .iter()
         .map(|root| create_directory(root, "datafusion"))
         .collect()
 }
@@ -82,7 +82,7 @@ fn create_directory(root: &str, prefix: &str) -> Result<String> {
     )))
 }
 
-fn get_file(file_name: &str, local_dirs: &Vec<String>) -> String {
+fn get_file(file_name: &str, local_dirs: &[String]) -> String {
     let mut hasher = DefaultHasher::new();
     file_name.hash(&mut hasher);
     let hash = hasher.finish();
@@ -93,7 +93,7 @@ fn get_file(file_name: &str, local_dirs: &Vec<String>) -> String {
     path.to_str().unwrap().to_string()
 }
 
-fn create_tmp_file(local_dirs: &Vec<String>) -> Result<String> {
+fn create_tmp_file(local_dirs: &[String]) -> Result<String> {
     let name = Uuid::new_v4().to_string();
     let mut path = get_file(&*name, local_dirs);
     while Path::new(path.as_str()).exists() {

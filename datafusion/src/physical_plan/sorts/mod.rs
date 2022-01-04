@@ -170,7 +170,7 @@ impl SortKeyCursor {
     fn init_cmp_if_needed(
         &self,
         other: &SortKeyCursor,
-        zipped: &Vec<((&ArrayRef, &ArrayRef), &SortOptions)>,
+        zipped: &[((&ArrayRef, &ArrayRef), &SortOptions)],
     ) -> Result<()> {
         let hm = self.batch_comparators.read().unwrap();
         if !hm.contains_key(&other.batch_idx) {

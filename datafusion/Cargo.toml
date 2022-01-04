@@ -40,11 +40,7 @@ path = "src/lib.rs"
 [features]
 default = ["crypto_expressions", "regex_expressions", "unicode_expressions"]
 simd = ["arrow/simd"]
-<<<<<<< HEAD
 crypto_expressions = ["md-5", "sha2", "blake2", "blake3"]
-=======
-crypto_expressions = ["md-5", "sha2"]
->>>>>>> ExternalSortExec v1
 regex_expressions = ["regex"]
 unicode_expressions = ["unicode-segmentation"]
 # FIXME: add pyarrow support to arrow2 pyarrow = ["pyo3", "arrow/pyarrow"]
