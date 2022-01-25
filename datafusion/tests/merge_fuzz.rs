@@ -85,7 +85,7 @@ impl TestCase {
     async fn run(self) {
         let TestCase { name, input } = self;
 
-        for batch_size in vec![1, 2, 7, 49, 50, 51, 100] {
+        for batch_size in [1, 2, 7, 49, 50, 51, 100] {
             let first_batch = input
                 .iter()
                 .map(|p| p.iter())
