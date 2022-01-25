@@ -37,7 +37,7 @@ pub struct AggregatedMetricsSet {
 
 impl AggregatedMetricsSet {
     /// Create a new aggregated set
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             intermediate: Arc::new(std::sync::Mutex::new(vec![])),
             final_: Arc::new(std::sync::Mutex::new(vec![])),
@@ -45,7 +45,7 @@ impl AggregatedMetricsSet {
     }
 
     /// create a new intermediate baseline
-    pub(crate) fn new_intermediate_baseline(&self, partition: usize) -> BaselineMetrics {
+    pub fn new_intermediate_baseline(&self, partition: usize) -> BaselineMetrics {
         let ms = ExecutionPlanMetricsSet::new();
         let result = BaselineMetrics::new(&ms, partition);
         self.intermediate.lock().unwrap().push(ms);
@@ -53,7 +53,7 @@ impl AggregatedMetricsSet {
     }
 
     /// create a new final baseline
-    pub(crate) fn new_final_baseline(&self, partition: usize) -> BaselineMetrics {
+    pub fn new_final_baseline(&self, partition: usize) -> BaselineMetrics {
         let ms = ExecutionPlanMetricsSet::new();
         let result = BaselineMetrics::new(&ms, partition);
         self.final_.lock().unwrap().push(ms);
@@ -137,7 +137,7 @@ impl AggregatedMetricsSet {
     }
 
     /// Aggregate all metrics into a one
-    pub(crate) fn aggregate_all(&self) -> MetricsSet {
+    pub fn aggregate_all(&self) -> MetricsSet {
         let metrics = ExecutionPlanMetricsSet::new();
         let baseline = BaselineMetrics::new(&metrics, 0);
         self.merge_compute_time(baseline.elapsed_compute());
