@@ -19,7 +19,7 @@
 
 pub mod local;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{RwLock};
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::io::Read;
@@ -39,25 +39,24 @@ use crate::error::{DataFusionError, Result};
 /// Note that the dynamic dispatch on the reader might
 /// have some performance impacts.
 #[async_trait]
-pub trait ObjectReader: Read + Send {
+pub trait ObjectReader: Read + Send + Sync {
     /// Get reader for a part [start, start + length] in the file asynchronously
     async fn chunk_reader(&self, start: u64, length: usize)
         -> Result<Box<dyn AsyncRead>>;
 
-    /// limit ourself to part [start, start + length] in the file
-    fn set_chunk(&mut self, start: u64, length: usize) -> Result<()>;
+    /// get reader for slice [start, start + length] of the file
+    fn slice(&self, start: u64, length: usize) -> Result<Box<dyn ObjectReader>>;
 
     /// length of the current chunk, if it's a whole file, then the file length
     fn chunk_length(&self) -> u64;
 }
 
-#[derive(Clone)]
 /// Chunked Reader
-pub struct ChunkObjectReader(pub Arc<Mutex<dyn ObjectReader>>);
+pub struct ChunkObjectReader(pub Box<dyn ObjectReader>);
 
 impl Read for ChunkObjectReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.lock().read(buf)
+        self.0.read(buf)
     }
 }
 

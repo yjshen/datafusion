@@ -58,14 +58,12 @@ impl ObjectStore for LocalFileSystem {
     }
 
     fn file_reader(&self, file: SizedFile) -> Result<ChunkObjectReader> {
-        Ok(ChunkObjectReader(Arc::new(Mutex::new(
-            LocalFileReader::new(file)?,
-        ))))
+        Ok(ChunkObjectReader(Box::new(LocalFileReader::new(file)?)))
     }
 }
 
 struct LocalFileReader {
-    r: BufReader<File>,
+    r: Arc<Mutex<BufReader<File>>>,
     total_size: u64,
     current_pos: u64,
     chunk_range: Option<(u64, u64)>,
@@ -74,20 +72,25 @@ struct LocalFileReader {
 impl LocalFileReader {
     fn new(file: SizedFile) -> Result<Self> {
         Ok(Self {
-            r: BufReader::new(File::open(file.path)?),
+            r: Arc::new(Mutex::new(BufReader::new(File::open(file.path)?))),
             total_size: file.size,
             current_pos: 0,
             chunk_range: None,
         })
     }
 
-    fn set_chunk(&mut self, start: u64, length: usize) -> Result<()> {
+    fn slice(&self, start: u64, length: usize) -> Result<Box<dyn ObjectReader>> {
         let end = start + length as u64;
         assert!(end <= self.total_size);
-        self.r.seek(SeekFrom::Start(start))?;
-        self.current_pos = start;
-        self.chunk_range = Some((start, end));
-        Ok(())
+
+        let r = self.r.clone();
+        r.lock().seek(SeekFrom::Start(start))?;
+        Ok(Box::new(LocalFileReader {
+            r,
+            total_size: self.total_size,
+            current_pos: start,
+            chunk_range: Some((start, end)),
+        }))
     }
 
     fn chunk_length(&self) -> u64 {
@@ -99,7 +102,7 @@ impl Read for LocalFileReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let chunk_end = self.chunk_range.map_or(self.total_size, |r| r.1);
         let read_len = std::cmp::min(buf.len(), (chunk_end - self.current_pos) as usize);
-        let read_len = self.r.read(&mut buf[..read_len])?;
+        let read_len = self.r.lock().read(&mut buf[..read_len])?;
         self.current_pos += read_len as u64;
         Ok(read_len)
     }
@@ -117,8 +120,8 @@ impl ObjectReader for LocalFileReader {
         )
     }
 
-    fn set_chunk(&mut self, start: u64, length: usize) -> Result<()> {
-        self.set_chunk(start, length)
+    fn slice(&self, start: u64, length: usize) -> Result<Box<dyn ObjectReader>> {
+        self.slice(start, length)
     }
 
     fn chunk_length(&self) -> u64 {

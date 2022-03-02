@@ -335,19 +335,16 @@ fn fetch_statistics(object_reader: ChunkObjectReader) -> Result<Statistics> {
 
 impl Length for ChunkObjectReader {
     fn len(&self) -> u64 {
-        self.0.lock().chunk_length()
+        self.0.chunk_length()
     }
 }
 
 impl ChunkReader for ChunkObjectReader {
-    type T = Self;
+    type T = ChunkObjectReader;
 
     fn get_read(&self, start: u64, length: usize) -> ParquetResult<Self::T> {
-        self.0
-            .lock()
-            .set_chunk(start, length)
-            .map_err(|e| ParquetError::ArrowError(e.to_string()))?;
-        Ok(self.clone())
+        Ok(ChunkObjectReader(self.0.slice(start, length)
+            .map_err(|e| ParquetError::ArrowError(e.to_string()))?))
     }
 }
 

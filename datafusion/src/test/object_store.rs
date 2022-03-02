@@ -27,7 +27,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{stream, AsyncRead, StreamExt};
-use parking_lot::Mutex;
 
 #[derive(Debug)]
 /// An object store implem that is useful for testing.
@@ -78,9 +77,7 @@ impl ObjectStore for TestObjectStore {
 
     fn file_reader(&self, file: SizedFile) -> Result<ChunkObjectReader> {
         match self.files.iter().find(|item| file.path == item.0) {
-            Some((_, size)) if *size == file.size => Ok(ChunkObjectReader(Arc::new(
-                Mutex::new(EmptyObjectReader(*size)),
-            ))),
+            Some((_, size)) if *size == file.size => Ok(ChunkObjectReader(Box::new(EmptyObjectReader(*size)))),
             Some(_) => Err(DataFusionError::IoError(io::Error::new(
                 io::ErrorKind::NotFound,
                 "found in test list but wrong size",
@@ -112,8 +109,8 @@ impl ObjectReader for EmptyObjectReader {
         unimplemented!()
     }
 
-    fn set_chunk(&mut self, _start: u64, _length: usize) -> Result<()> {
-        Ok(())
+    fn slice(&self, _start: u64, _length: usize) -> Result<Box<dyn ObjectReader>> {
+        Ok(Box::new(EmptyObjectReader(_length as u64)))
     }
 
     fn chunk_length(&self) -> u64 {
