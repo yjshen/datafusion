@@ -21,6 +21,7 @@ pub mod coercion_rule;
 #[cfg(feature = "crypto_expressions")]
 pub mod crypto_expressions;
 pub mod datetime_expressions;
+pub mod expr_schema;
 pub mod expressions;
 pub mod field_util;
 mod functions;

@@ -26,7 +26,6 @@ mod dfschema;
 mod display;
 mod expr;
 mod expr_rewriter;
-mod expr_schema;
 mod expr_simplier;
 mod expr_visitor;
 mod extension;
@@ -38,6 +37,7 @@ pub use builder::{
     build_join_schema, union_with_alias, LogicalPlanBuilder, UNNAMED_TABLE,
 };
 pub use datafusion_expr::expr_fn::binary_expr;
+pub use datafusion_physical_expr::expr_schema::ExprSchemable;
 pub use dfschema::{DFField, DFSchema, DFSchemaRef, ToDFSchema};
 pub use display::display_schema;
 pub use expr::{
@@ -56,7 +56,6 @@ pub use expr_rewriter::{
     normalize_col, normalize_cols, replace_col, rewrite_sort_cols_by_aggs,
     unnormalize_col, unnormalize_cols, ExprRewritable, ExprRewriter, RewriteRecursion,
 };
-pub use expr_schema::ExprSchemable;
 pub use expr_simplier::{ExprSimplifiable, SimplifyInfo};
 pub use expr_visitor::{ExprVisitable, ExpressionVisitor, Recursion};
 pub use extension::UserDefinedLogicalNode;

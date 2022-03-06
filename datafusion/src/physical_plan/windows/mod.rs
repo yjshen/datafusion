@@ -24,13 +24,13 @@ use crate::physical_plan::{
         cume_dist, dense_rank, lag, lead, percent_rank, rank, Literal, NthValue,
         PhysicalSortExpr, RowNumber,
     },
-    type_coercion::coerce,
-    window_functions::{signature_for_built_in, BuiltInWindowFunction, WindowFunction},
     PhysicalExpr,
 };
 use crate::scalar::ScalarValue;
 use arrow::datatypes::Schema;
-use datafusion_expr::WindowFrame;
+use datafusion_expr::{BuiltInWindowFunction, WindowFrame, WindowFunction};
+use datafusion_physical_expr::coercion_rule::type_coercion::coerce;
+use datafusion_physical_expr::expr_schema::window_functions::signature_for_built_in;
 use datafusion_physical_expr::window::BuiltInWindowFunctionExpr;
 use std::convert::TryInto;
 use std::sync::Arc;

@@ -43,10 +43,11 @@ use crate::{
 };
 use crate::{
     physical_plan::udf::ScalarUDF,
-    physical_plan::{aggregates, functions, window_functions},
+    physical_plan::{aggregates, functions},
     sql::parser::{CreateExternalTable, FileType, Statement as DFStatement},
 };
 use arrow::datatypes::*;
+use datafusion_physical_expr::expr_schema::window_functions;
 use hashbrown::HashMap;
 use sqlparser::ast::{
     BinaryOperator, DataType as SQLDataType, DateTimeField, Expr as SQLExpr, FunctionArg,

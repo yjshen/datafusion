@@ -25,7 +25,6 @@ use crate::datasource::{
     MemTable, TableProvider,
 };
 use crate::error::{DataFusionError, Result};
-use crate::logical_plan::expr_schema::ExprSchemable;
 use crate::logical_plan::plan::{
     Aggregate, Analyze, EmptyRelation, Explain, Filter, Join, Projection, Sort,
     TableScan, ToStringifiedPlan, Union, Window,
@@ -37,6 +36,7 @@ use arrow::{
     datatypes::{DataType, Schema, SchemaRef},
     record_batch::RecordBatch,
 };
+use datafusion_physical_expr::expr_schema::ExprSchemable;
 use std::convert::TryFrom;
 use std::iter;
 use std::{

@@ -22,3 +22,4 @@
 
 pub mod aggregate_rule;
 pub mod binary_rule;
+pub mod type_coercion;

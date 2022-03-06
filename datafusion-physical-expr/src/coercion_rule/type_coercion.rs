@@ -32,11 +32,12 @@
 use std::{sync::Arc, vec};
 
 use arrow::datatypes::{DataType, Schema, TimeUnit};
+use datafusion_common::DataFusionError;
+use datafusion_common::Result;
 
-use super::{functions::Signature, PhysicalExpr};
-use crate::error::{DataFusionError, Result};
-use crate::physical_plan::expressions::try_cast;
-use crate::physical_plan::functions::TypeSignature;
+use crate::expressions::try_cast;
+use crate::PhysicalExpr;
+use datafusion_expr::{Signature, TypeSignature};
 
 /// Returns `expressions` coerced to types compatible with
 /// `signature`, if possible.
@@ -210,11 +211,9 @@ pub fn can_coerce_from(type_into: &DataType, type_from: &DataType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physical_plan::{
-        expressions::col,
-        functions::{TypeSignature, Volatility},
-    };
+    use crate::expressions::col;
     use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion_expr::Volatility;
 
     #[test]
     fn test_maybe_data_types() {

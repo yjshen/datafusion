@@ -26,13 +26,12 @@ use arrow::{
     datatypes::{DataType, Schema},
 };
 
-use super::{
-    expressions::format_state_name, type_coercion::coerce, Accumulator, AggregateExpr,
-};
+use super::{expressions::format_state_name, Accumulator, AggregateExpr};
 use crate::error::Result;
 use crate::physical_plan::PhysicalExpr;
 pub use datafusion_expr::AggregateUDF;
 
+use datafusion_physical_expr::coercion_rule::type_coercion::coerce;
 use std::sync::Arc;
 
 /// Creates a physical expression of the UDAF, that includes all necessary type coercion.
