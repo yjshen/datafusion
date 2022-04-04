@@ -120,8 +120,7 @@ impl ExternalSorter {
             // NB timer records time taken on drop, so there are no
             // calls to `timer.done()` below.
             let _timer = tracking_metrics.elapsed_compute().timer();
-            let partial = sort_batch(input, self.schema.clone(), &self.expr)?;
-            in_mem_batches.push(partial);
+            in_mem_batches.push(input);
         }
         Ok(())
     }
@@ -290,10 +289,11 @@ fn in_mem_partial_sort(
 ) -> Result<SendableRecordBatchStream> {
     assert_ne!(buffered_batches.len(), 0);
     if buffered_batches.len() == 1 {
-        let result = buffered_batches.pop();
+        let input = buffered_batches.pop().unwrap();
+        let result = sort_batch(input, schema.clone(), expressions)?;
         Ok(Box::pin(SizedRecordBatchStream::new(
             schema,
-            vec![Arc::new(result.unwrap())],
+            vec![Arc::new(result)],
             tracking_metrics,
         )))
     } else {
