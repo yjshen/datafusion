@@ -36,10 +36,10 @@ mod roundtrip_tests {
         arrow::datatypes::{DataType, Field, IntervalUnit, TimeUnit, UnionMode},
         logical_expr::{BuiltinScalarFunction::Sqrt, Volatility},
         logical_plan::{col, Expr},
-        physical_plan::aggregates,
         prelude::*,
         scalar::ScalarValue,
     };
+    use datafusion_physical_expr::aggregate::aggregates;
     use std::sync::Arc;
 
     // Given a DataFusion logical Expr, convert it to protobuf and back, using debug formatting to test

@@ -18,10 +18,20 @@
 mod aggregate;
 mod built_in;
 mod built_in_window_function_expr;
+mod cume_dist;
+mod lead_lag;
+mod nth_value;
 pub(crate) mod partition_evaluator;
+mod rank;
+mod row_number;
 mod window_expr;
 
 pub use aggregate::AggregateWindowExpr;
 pub use built_in::BuiltInWindowExpr;
 pub use built_in_window_function_expr::BuiltInWindowFunctionExpr;
+pub use cume_dist::cume_dist;
+pub use lead_lag::{lag, lead};
+pub use nth_value::NthValue;
+pub use rank::{dense_rank, percent_rank, rank};
+pub use row_number::RowNumber;
 pub use window_expr::WindowExpr;

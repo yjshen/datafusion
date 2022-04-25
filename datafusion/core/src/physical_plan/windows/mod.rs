@@ -19,7 +19,6 @@
 
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::{
-    aggregates,
     expressions::{
         cume_dist, dense_rank, lag, lead, percent_rank, rank, Literal, NthValue,
         PhysicalSortExpr, RowNumber,
@@ -33,6 +32,7 @@ use datafusion_expr::{
     window_function::{signature_for_built_in, BuiltInWindowFunction, WindowFunction},
     WindowFrame,
 };
+use datafusion_physical_expr::aggregate::aggregates;
 use datafusion_physical_expr::window::BuiltInWindowFunctionExpr;
 use std::convert::TryInto;
 use std::sync::Arc;
@@ -155,7 +155,6 @@ fn create_built_in_window_expr(
 mod tests {
     use super::*;
     use crate::datafusion_data_access::object_store::local::LocalFileSystem;
-    use crate::physical_plan::aggregates::AggregateFunction;
     use crate::physical_plan::expressions::col;
     use crate::physical_plan::file_format::{CsvExec, FileScanConfig};
     use crate::physical_plan::{collect, Statistics};
@@ -166,6 +165,7 @@ mod tests {
     use arrow::array::*;
     use arrow::datatypes::{DataType, Field, SchemaRef};
     use arrow::record_batch::RecordBatch;
+    use datafusion_physical_expr::aggregate::aggregates::AggregateFunction;
     use futures::FutureExt;
 
     fn create_test_schema(partitions: usize) -> Result<(Arc<CsvExec>, SchemaRef)> {

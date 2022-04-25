@@ -23,6 +23,49 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+mod approx_distinct;
+mod approx_median;
+mod approx_percentile_cont;
+mod approx_percentile_cont_with_weight;
+mod array_agg;
+mod average;
+mod coercion_rule;
+mod correlation;
+mod count;
+mod covariance;
+mod distinct_expressions;
+#[macro_use]
+mod min_max;
+pub mod build_in;
+mod hyperloglog;
+mod stats;
+mod stddev;
+mod sum;
+mod tdigest;
+mod variance;
+
+/// Module with some convenient methods used in expression building
+pub mod helpers {
+    pub use min_max::{max, min};
+}
+
+pub use approx_distinct::ApproxDistinct;
+pub use approx_median::ApproxMedian;
+pub use approx_percentile_cont::ApproxPercentileCont;
+pub use approx_percentile_cont_with_weight::ApproxPercentileContWithWeight;
+pub use array_agg::ArrayAgg;
+pub use average::{Avg, AvgAccumulator};
+pub use correlation::Correlation;
+pub use count::Count;
+pub use covariance::{Covariance, CovariancePop};
+pub use distinct_expressions::{DistinctArrayAgg, DistinctCount};
+pub use min_max::{Max, Min};
+pub use min_max::{MaxAccumulator, MinAccumulator};
+pub use stats::StatsType;
+pub use stddev::{Stddev, StddevPop};
+pub use sum::Sum;
+pub use variance::{Variance, VariancePop};
+
 /// An aggregate expression that:
 /// * knows its resulting field
 /// * knows how to create its accumulator

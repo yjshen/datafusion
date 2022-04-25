@@ -37,7 +37,6 @@ use datafusion::{
         window_frames::{WindowFrame, WindowFrameBound, WindowFrameUnits},
         Column, DFField, DFSchema, DFSchemaRef, Expr, Operator,
     },
-    physical_plan::aggregates::AggregateFunction,
     prelude::{
         array, btrim, coalesce, date_part, date_trunc, lower, lpad, ltrim, md5,
         octet_length, regexp_match, rpad, rtrim, sha224, sha256, sha384, sha512, trim,
@@ -45,6 +44,7 @@ use datafusion::{
     },
     scalar::ScalarValue,
 };
+use datafusion_physical_expr::aggregate::aggregates::AggregateFunction;
 use std::sync::Arc;
 
 #[derive(Debug)]

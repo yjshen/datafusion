@@ -40,7 +40,6 @@ use crate::scalar::ScalarValue;
 use crate::sql::utils::{make_decimal_type, normalize_ident};
 use crate::{
     error::{DataFusionError, Result},
-    physical_plan::aggregates,
     physical_plan::udaf::AggregateUDF,
     physical_plan::udf::ScalarUDF,
     sql::parser::{CreateExternalTable, Statement as DFStatement},
@@ -49,6 +48,7 @@ use arrow::datatypes::*;
 use datafusion_expr::{window_function::WindowFunction, BuiltinScalarFunction};
 use hashbrown::HashMap;
 
+use datafusion_physical_expr::aggregate::aggregates;
 use sqlparser::ast::{
     BinaryOperator, DataType as SQLDataType, DateTimeField, Expr as SQLExpr, FunctionArg,
     FunctionArgExpr, Ident, Join, JoinConstraint, JoinOperator, ObjectName, Query,

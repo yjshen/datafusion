@@ -19,8 +19,8 @@
 
 use super::analyze::AnalyzeExec;
 use super::{
-    aggregates, empty::EmptyExec, expressions::binary, functions,
-    hash_join::PartitionMode, udaf, union::UnionExec, values::ValuesExec, windows,
+    empty::EmptyExec, expressions::binary, functions, hash_join::PartitionMode, udaf,
+    union::UnionExec, values::ValuesExec, windows,
 };
 use crate::execution::context::{ExecutionProps, SessionState};
 use crate::logical_plan::plan::{
@@ -62,6 +62,7 @@ use arrow::compute::SortOptions;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::{compute::can_cast_types, datatypes::DataType};
 use async_trait::async_trait;
+use datafusion_physical_expr::aggregate::aggregates;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use log::{debug, trace};

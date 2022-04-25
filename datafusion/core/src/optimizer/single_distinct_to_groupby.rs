@@ -201,8 +201,8 @@ impl OptimizerRule for SingleDistinctToGroupBy {
 mod tests {
     use super::*;
     use crate::logical_plan::{col, count, count_distinct, lit, max, LogicalPlanBuilder};
-    use crate::physical_plan::aggregates;
     use crate::test::*;
+    use datafusion_physical_expr::aggregate::aggregates;
 
     fn assert_optimized_plan_eq(plan: &LogicalPlan, expected: &str) {
         let rule = SingleDistinctToGroupBy::new();

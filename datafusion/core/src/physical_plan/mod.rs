@@ -31,6 +31,7 @@ use arrow::record_batch::RecordBatch;
 
 use async_trait::async_trait;
 pub use datafusion_expr::Accumulator;
+pub use datafusion_expr::AggregateFunction;
 pub use datafusion_expr::ColumnarValue;
 pub use display::DisplayFormatType;
 use futures::stream::Stream;
@@ -540,7 +541,6 @@ pub fn project_schema(
     Ok(schema)
 }
 
-pub mod aggregates;
 pub mod analyze;
 pub mod coalesce_batches;
 pub mod coalesce_partitions;

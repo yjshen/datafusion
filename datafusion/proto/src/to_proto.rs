@@ -39,7 +39,7 @@ use datafusion::{
         window_frames::{WindowFrame, WindowFrameBound, WindowFrameUnits},
         Column, DFField, DFSchemaRef, Expr,
     },
-    physical_plan::aggregates::AggregateFunction,
+    physical_plan::AggregateFunction,
     scalar::ScalarValue,
 };
 

@@ -28,7 +28,6 @@ use datafusion::datasource::listing::PartitionedFile;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::window_frames::WindowFrame;
 use datafusion::logical_plan::FunctionRegistry;
-use datafusion::physical_plan::aggregates::create_aggregate_expr;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::cross_join::CrossJoinExec;
@@ -50,6 +49,7 @@ use datafusion::physical_plan::windows::{create_window_expr, WindowAggExec};
 use datafusion::physical_plan::{
     AggregateExpr, ExecutionPlan, Partitioning, PhysicalExpr, WindowExpr,
 };
+use datafusion_physical_expr::aggregate::aggregates::create_aggregate_expr;
 use datafusion_proto::from_proto::parse_expr;
 
 use crate::error::BallistaError;

@@ -15,12 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::expressions::approx_percentile_cont::ApproxPercentileAccumulator;
+use crate::aggregate::approx_percentile_cont::ApproxPercentileAccumulator;
 use crate::expressions::ApproxPercentileCont;
-use crate::{
-    tdigest::{Centroid, TDigest, DEFAULT_MAX_SIZE},
-    AggregateExpr, PhysicalExpr,
-};
+use crate::{AggregateExpr, PhysicalExpr};
 use arrow::{
     array::ArrayRef,
     datatypes::{DataType, Field},
@@ -30,6 +27,7 @@ use datafusion_common::Result;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Accumulator;
 
+use crate::aggregate::tdigest::{Centroid, TDigest, DEFAULT_MAX_SIZE};
 use std::{any::Any, sync::Arc};
 
 /// APPROX_PERCENTILE_CONT_WITH_WEIGTH aggregate expression

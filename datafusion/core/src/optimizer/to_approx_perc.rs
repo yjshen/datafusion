@@ -23,8 +23,8 @@ use crate::logical_plan::plan::Aggregate;
 use crate::logical_plan::{Expr, LogicalPlan};
 use crate::optimizer::optimizer::OptimizerRule;
 use crate::optimizer::utils;
-use crate::physical_plan::aggregates;
 use crate::scalar::ScalarValue;
+use datafusion_physical_expr::aggregate::aggregates;
 
 /// espression/function to approx_percentile optimizer rule
 ///  ```text
@@ -126,8 +126,8 @@ impl OptimizerRule for ToApproxPerc {
 mod tests {
     use super::*;
     use crate::logical_plan::{col, LogicalPlanBuilder};
-    use crate::physical_plan::aggregates;
     use crate::test::*;
+    use datafusion_physical_expr::aggregate::aggregates;
 
     fn assert_optimized_plan_eq(plan: &LogicalPlan, expected: &str) {
         let rule = ToApproxPerc::new();

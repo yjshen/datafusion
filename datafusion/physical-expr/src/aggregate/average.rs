@@ -21,6 +21,7 @@ use std::any::Any;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
+use crate::aggregate::sum;
 use crate::{AggregateExpr, PhysicalExpr};
 use arrow::compute;
 use arrow::datatypes::DataType;
@@ -32,7 +33,7 @@ use datafusion_common::ScalarValue;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::Accumulator;
 
-use super::{format_state_name, sum};
+use crate::expressions::format_state_name;
 
 /// AVG aggregate expression
 #[derive(Debug)]

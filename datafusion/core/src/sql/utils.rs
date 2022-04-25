@@ -547,8 +547,8 @@ pub(crate) fn normalize_ident(id: Ident) -> String {
 mod tests {
     use super::*;
     use crate::logical_plan::col;
-    use crate::physical_plan::aggregates::AggregateFunction;
     use datafusion_expr::window_function::WindowFunction;
+    use datafusion_physical_expr::aggregate::aggregates::AggregateFunction;
 
     #[test]
     fn test_group_window_expr_by_sort_keys_empty_case() -> Result<()> {
