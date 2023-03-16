@@ -19,6 +19,8 @@ use arrow::datatypes::DataType;
 use cranelift::codegen::ir;
 use datafusion_common::{DFSchemaRef, DataFusionError, ScalarValue};
 use std::fmt::{Display, Formatter};
+use llvm_sys::core::*;
+use llvm_sys::prelude::*;
 
 #[derive(Clone, Debug)]
 /// Statement
@@ -214,6 +216,15 @@ pub struct JITType {
     /// The cranelift type
     pub(crate) native: ir::Type,
     /// re-expose inner field of `ir::Type` out for easier pattern matching
+    pub(crate) code: u8,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+/// Type to be used in JIT
+pub struct JITType1 {
+    /// The LLVM type
+    pub(crate) native: LLVMTypeRef,
+    /// re-expose inner field for easier pattern matching
     pub(crate) code: u8,
 }
 
