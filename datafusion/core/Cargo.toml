@@ -80,7 +80,7 @@ unicode_expressions = [
 
 [dependencies]
 ahash = { workspace = true }
-apache-avro = { version = "0.16", optional = true }
+apache-avro = { version = "0.17", optional = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
