@@ -61,5 +61,5 @@ serde_json = { workspace = true, optional = true }
 datafusion-functions = { workspace = true, default-features = true }
 datafusion-functions-aggregate = { workspace = true }
 doc-comment = { workspace = true }
-strum = { version = "0.26.1", features = ["derive"] }
+strum = { version = "0.27.1", features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

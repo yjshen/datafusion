@@ -50,7 +50,7 @@ datafusion-physical-expr-common = { workspace = true }
 paste = "^1.0"
 serde_json = { workspace = true }
 sqlparser = { workspace = true }
-strum = { version = "0.26.1", features = ["derive"] }
+strum = { version = "0.27.1", features = ["derive"] }
 strum_macros = "0.26.0"
 
 [dev-dependencies]
