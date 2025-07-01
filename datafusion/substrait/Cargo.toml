@@ -40,7 +40,7 @@ itertools = { workspace = true }
 object_store = { workspace = true }
 pbjson-types = "0.7"
 # TODO use workspace version
-prost = "0.13"
+prost = "0.14"
 substrait = { version = "0.41", features = ["serde"] }
 url = { workspace = true }
 
