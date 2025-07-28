@@ -71,7 +71,7 @@ regex = { workspace = true, optional = true }
 
 [dev-dependencies]
 arrow = { workspace = true, features = ["test_utils"] }
-criterion = "0.5"
+criterion = "0.7"
 rand = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
