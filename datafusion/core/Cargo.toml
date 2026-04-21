@@ -142,7 +142,7 @@ zstd = { version = "0.13", optional = true, default-features = false }
 arrow-buffer = { workspace = true }
 async-trait = { workspace = true }
 bigdecimal = { workspace = true }
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 csv = "1.1.6"
 ctor = { workspace = true }
 doc-comment = { workspace = true }
