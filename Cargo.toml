@@ -88,7 +88,7 @@ arrow-string = { version = "52.2.0", default-features = false }
 async-trait = "0.1.73"
 bigdecimal = "=0.4.1"
 bytes = "1.4"
-chrono = { version = "0.4.34", default-features = false }
+chrono = { version = "0.4.44", default-features = false }
 ctor = "0.2.0"
 dashmap = "6.0.1"
 datafusion = { path = "datafusion/core", version = "41.0.0", default-features = false }
