@@ -133,7 +133,7 @@ parquet = { version = "52.2.0", default-features = false, features = [
 prost = "0.12.3"
 rand = "0.8"
 regex = "1.8"
-rstest = "0.22.0"
+rstest = "0.26.1"
 serde_json = "1"
 sqlparser = { version = "0.50.0", features = ["visitor"] }
 tempfile = "3"
